@@ -2,7 +2,6 @@
 // - Lee la cuenta BondingCurve on-chain usando RPC público (no Helius)
 // - Calcula precio en SOL por token a partir de virtual reserves
 // - Soporta DRY_RUN para PnL y simulaciones
-// - Minimalista pero preparado para Sniper + Flintr
 
 import { Connection, PublicKey, LAMPORTS_PER_SOL } from '@solana/web3.js';
 import IORedis from 'ioredis';
@@ -14,7 +13,7 @@ const PUMP_PROGRAM_ID_STR =
 
 const PUMP_PROGRAM_ID = new PublicKey(PUMP_PROGRAM_ID_STR);
 
-// Redis (opcional, pero muy útil para cache y graduación)
+// Redis opcional (cache y graduación)
 let redis = null;
 if (REDIS_URL) {
   redis = new IORedis(REDIS_URL, {
@@ -46,14 +45,14 @@ const PRICE_CACHE_TTL_MS = 3000;
 // {
 //   mint: string,
 //   price: number,                 // SOL por token
-//   virtualSolReserves: number,
-//   virtualTokenReserves: number,
-//   realSolReserves: number,
-//   realTokenReserves: number,
+//   virtualSolReserves: number,    // en SOL
+//   virtualTokenReserves: number,  // en tokens (10^decimals)
+//   realSolReserves: number,       // en SOL
+//   realTokenReserves: number,     // en tokens
 //   tokenTotalSupply: number,
 //   graduated: boolean,
-//   source: 'pumpfun_bonding_curve',
-//   fetchedAt: number              // timestamp ms
+//   source: 'pumpfun_bonding_curve' | 'fallback_entry_price',
+//   fetchedAt: number
 // }
 //
 // ValueResult:
@@ -95,9 +94,7 @@ export class PriceService {
     try {
       // 2) Obtener estado del bonding curve on-chain
       const curveState = await this._fetchBondingCurveState(mint);
-      if (!curveState) {
-        return null;
-      }
+      if (!curveState) return null;
 
       const {
         virtualTokenReserves,
@@ -122,11 +119,14 @@ export class PriceService {
       const result = {
         mint: mintStr,
         price,
-        virtualSolReserves: Number(virtualSolReserves),
-        virtualTokenReserves: Number(virtualTokenReserves),
-        realSolReserves: Number(realSolReserves),
-        realTokenReserves: Number(realTokenReserves),
-        tokenTotalSupply: Number(tokenTotalSupply),
+        virtualSolReserves: Number(virtualSolReserves) / LAMPORTS_PER_SOL,
+        virtualTokenReserves:
+          Number(virtualTokenReserves) / 10 ** PUMP_TOKEN_DECIMALS,
+        realSolReserves: Number(realSolReserves) / LAMPORTS_PER_SOL,
+        realTokenReserves:
+          Number(realTokenReserves) / 10 ** PUMP_TOKEN_DECIMALS,
+        tokenTotalSupply:
+          Number(tokenTotalSupply) / 10 ** PUMP_TOKEN_DECIMALS,
         graduated: complete,
         source: 'pumpfun_bonding_curve',
         fetchedAt: now,
@@ -158,8 +158,7 @@ export class PriceService {
   }
 
   /**
-   * Igual que getPrice pero con fallback a entryPrice guardado en Redis,
-   * útil para posiciones antiguas o tokens graduados sin mercado claro.
+   * Igual que getPrice pero con fallback a entryPrice guardado en Redis.
    * @param {string} mintStr
    * @returns {Promise<PriceResult | null>}
    */
@@ -239,27 +238,8 @@ export class PriceService {
 
   /**
    * Deriva el PDA del bonding curve y lee la cuenta on-chain.
-   * Usa el layout del IDL oficial:
-   *  struct BondingCurve {
-   *    virtualTokenReserves: u64
-   *    virtualSolReserves:   u64
-   *    realTokenReserves:    u64
-   *    realSolReserves:      u64
-   *    tokenTotalSupply:     u64
-   *    complete:             bool
-   *  }
-   *
-   * Con Anchor, la cuenta lleva 8 bytes de discriminator al inicio.
    *
    * @param {PublicKey} mint
-   * @returns {Promise<{
-   *   virtualTokenReserves: bigint,
-   *   virtualSolReserves: bigint,
-   *   realTokenReserves: bigint,
-   *   realSolReserves: bigint,
-   *   tokenTotalSupply: bigint,
-   *   complete: boolean
-   * } | null>}
    */
   async _fetchBondingCurveState(mint) {
     // seeds = ["bonding-curve", mint]
@@ -295,12 +275,8 @@ export class PriceService {
 
   /**
    * Calcula el precio (SOL por token) a partir de virtual reserves.
-   * Formula: (virtualSol / LAMPORTS_PER_SOL) / (virtualToken / 10^decimals)
    *
-   * @param {{
-   *   virtualTokenReserves: bigint,
-   *   virtualSolReserves: bigint
-   * }} curveState
+   * @param {{virtualTokenReserves: bigint, virtualSolReserves: bigint}} curveState
    * @returns {number}
    */
   _calculatePriceFromCurve(curveState) {
@@ -318,7 +294,7 @@ export class PriceService {
   }
 }
 
-// Singleton para usar desde otros módulos
+// Singleton
 let priceServiceInstance = null;
 
 export function getPriceService() {
@@ -328,7 +304,7 @@ export function getPriceService() {
   return priceServiceInstance;
 }
 
-// Helpers opcionales de compatibilidad
+// Helpers de compatibilidad
 export async function getPriceFromBondingCurve(mint, forceFresh = false) {
   const ps = getPriceService();
   return await ps.getPrice(mint, forceFresh);
