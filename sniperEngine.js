@@ -9,8 +9,7 @@ import { sendTelegramAlert } from './telegram.js';
 const FLINTR_API_KEY = process.env.FLINTR_API_KEY;
 
 // DRY_RUN: por defecto PAPER salvo que pongas DRY_RUN="false"
-const DRY_RUN =
-  (process.env.DRY_RUN || '').trim().toLowerCase() !== 'false';
+const DRY_RUN = (process.env.DRY_RUN || '').trim().toLowerCase() !== 'false';
 
 // Trading automático
 const AUTO_TRADING =
@@ -24,7 +23,9 @@ const MAX_POSITIONS = parseInt(process.env.MAX_POSITIONS || '2', 10);
 const MIN_LIQUIDITY_SOL = parseFloat(process.env.MIN_LIQUIDITY_SOL || '2');
 
 // Volumen inicial mínimo (bundleAmount de Flintr) en SOL
-const MIN_INITIAL_VOLUME_SOL = parseFloat(process.env.MIN_INITIAL_VOLUME_SOL || '0');
+const MIN_INITIAL_VOLUME_SOL = parseFloat(
+  process.env.MIN_INITIAL_VOLUME_SOL || '0',
+);
 
 // Tiempo mínimo entre reentradas al mismo token (segundos)
 const MIN_TIME_BETWEEN_SAME_TOKEN = parseInt(
@@ -43,7 +44,8 @@ const ONLY_KING_OF_HILL =
   (process.env.ONLY_KING_OF_HILL || '').trim().toLowerCase() === 'true';
 
 // Telegram
-const TELEGRAM_CHAT_ID = process.env.TELEGRAM_OWNER_CHAT_ID || process.env.TELEGRAM_CHAT_ID;
+const TELEGRAM_CHAT_ID =
+  process.env.TELEGRAM_OWNER_CHAT_ID || process.env.TELEGRAM_CHAT_ID;
 const TELEGRAM_ALERT_ON_ENTRY =
   (process.env.TELEGRAM_ALERT_ON_ENTRY || '').trim().toLowerCase() === 'true';
 
@@ -52,7 +54,10 @@ const VERBOSE_LOGGING =
   (process.env.VERBOSE_LOGGING || '').trim().toLowerCase() === 'true';
 
 // Intervalo del loop de riesgo (ms)
-const RISK_TICK_INTERVAL = parseInt(process.env.RISK_TICK_INTERVAL || '5000', 10);
+const RISK_TICK_INTERVAL = parseInt(
+  process.env.RISK_TICK_INTERVAL || '5000',
+  10,
+);
 
 // Mapa para cooldown por mint
 const lastEntryByMint = new Map();
@@ -82,7 +87,8 @@ function initCore(redis) {
       stopLoss: process.env.STOP_LOSS_PERCENT || '13',
       takeProfit: process.env.TAKE_PROFIT_PERCENT || '30',
       minLiquidity: MIN_LIQUIDITY_SOL,
-      maxDailyLoss: process.env.MAX_DAILY_LOSS_SOL || '0.5',
+      minInitialVolume: MIN_INITIAL_VOLUME_SOL,
+      maxDailyLoss: parseFloat(process.env.MAX_DAILY_LOSS_SOL || '2'),
       enableRiskManagerLogs: VERBOSE_LOGGING,
     };
 
@@ -107,7 +113,10 @@ async function handleGraduationEvent(redis, signal) {
       console.log(`🎓 Flintr: token graduated ${mint.slice(0, 8)}`);
     }
   } catch (error) {
-    console.error('⚠️ Error handling Flintr graduation:', error.message);
+    console.error(
+      '⚠️ Error handling Flintr graduation:',
+      error?.message || String(error),
+    );
   }
 }
 
@@ -228,7 +237,7 @@ async function handleMintEvent(redis, signal) {
     );
 
     if (!riskDecision.allowed) {
-      if ( VERBOSE_LOGGING ) {
+      if (VERBOSE_LOGGING) {
         console.log(
           `   🛑 Entrada bloqueada por RiskManager (razón: ${riskDecision.reason})`,
         );
@@ -298,10 +307,7 @@ async function handleMintEvent(redis, signal) {
     }
 
     const storedEntryPrice =
-      buyResult.entryPrice ||
-      entryPrice ||
-      solSpent / tokensReceived ||
-      0;
+      buyResult.entryPrice || entryPrice || solSpent / tokensReceived || 0;
 
     // 5) Guardar posición en Redis via PositionManager
     const position = await positionManager.openPosition(
@@ -317,7 +323,10 @@ async function handleMintEvent(redis, signal) {
     try {
       await redis.hset(`position:${mint}`, 'entry_strategy', 'flintr');
     } catch (e) {
-      console.error('⚠️ No se pudo marcar entry_strategy=flintr:', e.message);
+      console.error(
+        '⚠️ No se pudo marcar entry_strategy=flintr:',
+        e?.message || String(e),
+      );
     }
 
     lastEntryByMint.set(mint, now);
@@ -343,7 +352,7 @@ async function handleMintEvent(redis, signal) {
       );
     }
   } catch (error) {
-    console.error('❌ Error en handleMintEvent:', error.message);
+    console.error('❌ Error en handleMintEvent:', error?.message || String(error));
   }
 }
 
@@ -364,7 +373,7 @@ function startRiskLoop(redis) {
 
       await redis.set('sniper:last_risk_tick', Date.now().toString());
     } catch (error) {
-      console.error('⚠️ Error en risk loop:', error.message);
+      console.error('⚠️ Error en risk loop:', error?.message || String(error));
     }
   }, RISK_TICK_INTERVAL);
 }
@@ -382,7 +391,8 @@ function startFlintrWebSocket(redis) {
   let reconnectDelay = 5000;
 
   const connect = () => {
-    const url = `wss://api-v1.flintr.io/?token=${FLINTR_API_KEY}`;
+    // Endpoint correcto según docs de Flintr
+    const url = `wss://api-v1.flintr.io/sub?token=${FLINTR_API_KEY}`;
     console.log(`\n🌐 Conectando a Flintr WebSocket: ${url}`);
 
     ws = new WebSocket(url);
@@ -425,12 +435,18 @@ function startFlintrWebSocket(redis) {
           return;
         }
       })().catch((err) => {
-        console.error('⚠️ Error procesando mensaje Flintr:', err.message);
+        console.error(
+          '⚠️ Error procesando mensaje Flintr:',
+          err?.message || String(err),
+        );
       });
     });
 
     ws.on('error', (err) => {
-      console.error('⚠️ Flintr WebSocket error:', err.message);
+      console.error(
+        '⚠️ Flintr WebSocket error:',
+        err?.message || String(err),
+      );
     });
 
     ws.on('close', (code, reason) => {
