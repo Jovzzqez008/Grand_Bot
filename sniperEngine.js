@@ -1,9 +1,4 @@
-// sniperEngine.js - Flintr-based Pump.fun Sniper Core
-// ✅ No copy trading
-// ✅ Usa Flintr WebSocket como detector de nuevos tokens
-// ✅ Usa PriceService (bonding curve / SDK) para precios
-// ✅ Respeta DRY_RUN y RiskManager (PnL correcto)
-// ✅ Marca posiciones como entry_strategy = 'flintr'
+// sniperEngine.js - Flintr-based Pump.fun Sniper Core (DRY_RUN + PnL correcto)
 
 import WebSocket from 'ws';
 import { getPriceService } from './priceService.js';
@@ -13,14 +8,17 @@ import { sendTelegramAlert } from './telegram.js';
 
 const FLINTR_API_KEY = process.env.FLINTR_API_KEY;
 
-// DRY_RUN: por defecto PAPER (true) salvo que pongas DRY_RUN="false"
-const DRY_RUN = process.env.DRY_RUN !== 'false';
-// Trading automático activado solo si lo pones explícito
-const AUTO_TRADING = process.env.ENABLE_AUTO_TRADING === 'true';
+// DRY_RUN: por defecto PAPER salvo que pongas DRY_RUN="false"
+const DRY_RUN =
+  (process.env.DRY_RUN || '').trim().toLowerCase() !== 'false';
 
-// Tamaños y riesgo básicos
+// Trading automático
+const AUTO_TRADING =
+  (process.env.ENABLE_AUTO_TRADING || '').trim().toLowerCase() === 'true';
+
+// Tamaños / slots
 const POSITION_SIZE_SOL = parseFloat(process.env.POSITION_SIZE_SOL || '0.05');
-const MAX_POSITIONS = parseInt(process.env.MAX_POSITIONS || '2');
+const MAX_POSITIONS = parseInt(process.env.MAX_POSITIONS || '2', 10);
 
 // Liquidez mínima sobre bonding curve (virtualSolReserves)
 const MIN_LIQUIDITY_SOL = parseFloat(process.env.MIN_LIQUIDITY_SOL || '2');
@@ -28,38 +26,39 @@ const MIN_LIQUIDITY_SOL = parseFloat(process.env.MIN_LIQUIDITY_SOL || '2');
 // Volumen inicial mínimo (bundleAmount de Flintr) en SOL
 const MIN_INITIAL_VOLUME_SOL = parseFloat(process.env.MIN_INITIAL_VOLUME_SOL || '0');
 
-// Tiempo mínimo entre reentradas al MISMO token (segundos)
-const MIN_TIME_BETWEEN_SAME_TOKEN =
-  parseInt(process.env.MIN_TIME_BETWEEN_SAME_TOKEN || '900'); // 15 min por defecto
+// Tiempo mínimo entre reentradas al mismo token (segundos)
+const MIN_TIME_BETWEEN_SAME_TOKEN = parseInt(
+  process.env.MIN_TIME_BETWEEN_SAME_TOKEN || '900', // 15 min
+  10,
+);
 
-// Slots reservados para flintr sniper dentro de MAX_POSITIONS (el resto sería para otras estrategias)
-const RESERVED_FLINTR_POSITIONS =
-  parseInt(process.env.RESERVED_FLINTR_POSITIONS || '0');
+// Slots reservados para Flintr dentro de MAX_POSITIONS
+const RESERVED_FLINTR_POSITIONS = parseInt(
+  process.env.RESERVED_FLINTR_POSITIONS || '0',
+  10,
+);
 
-// Solo tokens que lleguen a King of the Hill (se usará más adelante para filtros avanzados)
+// Solo tokens que lleguen a King of the Hill (para futuro)
 const ONLY_KING_OF_HILL =
   (process.env.ONLY_KING_OF_HILL || '').trim().toLowerCase() === 'true';
 
 // Telegram
-const TELEGRAM_CHAT_ID = process.env.TELEGRAM_CHAT_ID;
+const TELEGRAM_CHAT_ID = process.env.TELEGRAM_OWNER_CHAT_ID || process.env.TELEGRAM_CHAT_ID;
 const TELEGRAM_ALERT_ON_ENTRY =
   (process.env.TELEGRAM_ALERT_ON_ENTRY || '').trim().toLowerCase() === 'true';
-const TELEGRAM_ALERT_ON_EXIT =
-  (process.env.TELEGRAM_ALERT_ON_EXIT || '').trim().toLowerCase() === 'true';
 
-// Logs detallados
+// Logging detallado
 const VERBOSE_LOGGING =
   (process.env.VERBOSE_LOGGING || '').trim().toLowerCase() === 'true';
 
-// Intervalo del loop de riesgo / monitoreo (ms)
-const RISK_TICK_INTERVAL = parseInt(process.env.RISK_TICK_INTERVAL || '5000');
+// Intervalo del loop de riesgo (ms)
+const RISK_TICK_INTERVAL = parseInt(process.env.RISK_TICK_INTERVAL || '5000', 10);
 
-// Map para limitar reentradas al mismo mint
+// Mapa para cooldown por mint
 const lastEntryByMint = new Map();
 
 // Instancias compartidas
 const priceService = getPriceService();
-
 let tradeExecutor = null;
 let riskManager = null;
 let positionManager = null;
@@ -69,9 +68,10 @@ let positionManager = null;
  */
 function initCore(redis) {
   if (!tradeExecutor) {
-    tradeExecutor = new TradeExecutor(process.env.PRIVATE_KEY, {
-      dryRun: DRY_RUN
-    });
+    const rpcUrl = process.env.RPC_URL;
+    const pk = process.env.PRIVATE_KEY;
+
+    tradeExecutor = new TradeExecutor(pk, rpcUrl, DRY_RUN);
   }
 
   if (!riskManager) {
@@ -79,12 +79,11 @@ function initCore(redis) {
       maxPositionSize: POSITION_SIZE_SOL,
       maxActivePositions: MAX_POSITIONS,
       reservedFlintrPositions: RESERVED_FLINTR_POSITIONS,
-      // Estos dos ya los utiliza RiskManager internamente
-      stopLossPercent: parseFloat(process.env.STOP_LOSS_PERCENT || '13'),
-      takeProfitPercent: parseFloat(process.env.TAKE_PROFIT_PERCENT || '30'),
-      maxDailyLossSOL: parseFloat(process.env.MAX_DAILY_LOSS_SOL || '0.5'),
-      minLiquiditySOL: MIN_LIQUIDITY_SOL,
-      enableRiskManagerLogs: VERBOSE_LOGGING
+      stopLoss: process.env.STOP_LOSS_PERCENT || '13',
+      takeProfit: process.env.TAKE_PROFIT_PERCENT || '30',
+      minLiquidity: MIN_LIQUIDITY_SOL,
+      maxDailyLoss: process.env.MAX_DAILY_LOSS_SOL || '0.5',
+      enableRiskManagerLogs: VERBOSE_LOGGING,
     };
 
     riskManager = new RiskManager(riskConfig, redis);
@@ -96,18 +95,14 @@ function initCore(redis) {
 }
 
 /**
- * Procesa eventos "graduation" de Flintr:
- * - Marca en Redis que el token ya graduó
- * - Esto ayuda a PriceService a usar DEX/jupiter para el precio
+ * Marca token como graduado (para PriceService / graduación)
  */
 async function handleGraduationEvent(redis, signal) {
   try {
     const mint = signal?.data?.mint;
     if (!mint) return;
 
-    const key = `graduated:${mint}`;
-    await redis.set(key, 'true', 'EX', 3 * 24 * 60 * 60); // 3 días
-
+    await redis.set(`graduated:${mint}`, 'true', 'EX', 3 * 24 * 60 * 60);
     if (VERBOSE_LOGGING) {
       console.log(`🎓 Flintr: token graduated ${mint.slice(0, 8)}`);
     }
@@ -117,7 +112,7 @@ async function handleGraduationEvent(redis, signal) {
 }
 
 /**
- * Lógica principal para eventos de "mint" en Pump.fun provenientes de Flintr
+ * Lógica principal para eventos "mint" de Flintr (Pump.fun)
  */
 async function handleMintEvent(redis, signal) {
   try {
@@ -133,15 +128,15 @@ async function handleMintEvent(redis, signal) {
 
     if (!mint || !mint.endsWith('pump')) {
       if (VERBOSE_LOGGING) {
-        console.log('⚠️ Flintr mint sin mint válido o sin sufijo pump:', mint);
+        console.log('⚠️ Flintr mint sin mint válido / sin sufijo pump:', mint);
       }
       return;
     }
 
     const symbol = metaData.symbol || 'UNKNOWN';
     const name = metaData.name || symbol;
-    const creator = tokenData.creator;
     const decimals = tokenData.decimals ?? 6;
+    const creator = tokenData.creator || 'N/A';
     const isBundled = !!tokenData.isBundled;
     const bundleAmount = Number(tokenData.bundleAmount || 0);
     const flintrLatestPrice = tokenData.latestPrice
@@ -150,7 +145,7 @@ async function handleMintEvent(redis, signal) {
 
     const now = Date.now();
 
-    // Respetar ventana mínima entre reentradas al mismo token
+    // Cooldown por mint
     const lastEntry = lastEntryByMint.get(mint);
     if (lastEntry && now - lastEntry < MIN_TIME_BETWEEN_SAME_TOKEN * 1000) {
       if (VERBOSE_LOGGING) {
@@ -158,43 +153,45 @@ async function handleMintEvent(redis, signal) {
           `⏳ Cooldown activo para ${mint.slice(0, 8)} (${(
             (now - lastEntry) /
             1000
-          ).toFixed(0)}s desde última entrada)`
+          ).toFixed(0)}s desde última entrada)`,
         );
       }
       return;
     }
 
-    // Filtro básico de bundle / volumen inicial
+    // Filtro por volumen inicial (bundle)
     if (MIN_INITIAL_VOLUME_SOL > 0 && bundleAmount < MIN_INITIAL_VOLUME_SOL) {
       if (VERBOSE_LOGGING) {
         console.log(
-          `⚠️ Bundle muy pequeño para ${symbol} (${mint.slice(
+          `⚠️ Bundle pequeño para ${symbol} (${mint.slice(
             0,
-            8
-          )}) - bundle: ${bundleAmount.toFixed(4)} SOL (mín: ${MIN_INITIAL_VOLUME_SOL} SOL)`
+            8,
+          )}) - bundle: ${bundleAmount.toFixed(
+            4,
+          )} SOL (mín: ${MIN_INITIAL_VOLUME_SOL} SOL)`,
         );
       }
       return;
     }
 
-    console.log(
-      `\n🚀 [FLINTR] Nuevo token Pump.fun detectado: ${name} (${symbol})`
-    );
+    console.log(`\n🚀 [FLINTR] Nuevo Pump.fun token: ${name} (${symbol})`);
     console.log(`   Mint: ${mint}`);
-    console.log(`   Creator: ${creator || 'N/A'}`);
+    console.log(`   Creator: ${creator}`);
     console.log(`   Decimals: ${decimals}`);
     console.log(
-      `   Bundle: ${bundleAmount.toFixed(4)} SOL | Bundled: ${isBundled ? '✅' : '❌'}`
+      `   Bundle: ${bundleAmount.toFixed(4)} SOL | Bundled: ${
+        isBundled ? '✅' : '❌'
+      }`,
     );
     if (flintrLatestPrice) {
       console.log(`   Flintr latestPrice: ${flintrLatestPrice}`);
     }
 
-    // 1) Obtener precio on-chain usando PriceService (SDK/bonding curve)
+    // 1) Precio on-chain usando PriceService (SDK/bonding curve)
     const pumpPrice = await priceService.getPrice(mint, true);
     if (!pumpPrice || !pumpPrice.price || pumpPrice.graduated) {
       console.log(
-        `   ⚠️ No se pudo obtener precio inicial válido desde Pump.fun bonding curve`
+        '   ⚠️ No se pudo obtener precio inicial válido (o ya graduado)',
       );
       return;
     }
@@ -202,33 +199,38 @@ async function handleMintEvent(redis, signal) {
     const entryPrice = pumpPrice.price;
     const virtualSolReserves = pumpPrice.virtualSolReserves || 0;
 
-    console.log(`   💰 Precio inicial (SDK): ${entryPrice.toFixed(12)} SOL/token`);
     console.log(
-      `   💧 Liquidez virtual: ${virtualSolReserves.toFixed(3)} SOL (mín: ${MIN_LIQUIDITY_SOL} SOL)`
+      `   💰 Precio inicial (SDK): ${entryPrice.toFixed(12)} SOL/token`,
+    );
+    console.log(
+      `   💧 Liquidez virtual: ${virtualSolReserves.toFixed(
+        3,
+      )} SOL (mín: ${MIN_LIQUIDITY_SOL} SOL)`,
     );
 
-    // 2) Chequeo de riesgo: slots, liquidez, daily PnL, etc.
+    // 2) Chequeo de slots / daily loss / liquidez via RiskManager
     const signals = {
       source: 'flintr',
-      latestPrice: flintrLatestPrice,
       bundleAmount,
+      latestPrice: flintrLatestPrice,
       virtualSolReserves,
       isBundled,
       creator,
       bondingCurve: ammData.bondingCurve,
-      associatedBondingCurve: ammData.associatedBondingCurve
+      associatedBondingCurve: ammData.associatedBondingCurve,
+      onlyKingOfHill: ONLY_KING_OF_HILL,
     };
 
     const riskDecision = await riskManager.shouldEnterTrade(
       mint,
       entryPrice,
-      signals
+      signals,
     );
 
     if (!riskDecision.allowed) {
-      if (VERBOSE_LOGGING) {
+      if ( VERBOSE_LOGGING ) {
         console.log(
-          `   🛑 Entrada bloqueada por RiskManager (razón: ${riskDecision.reason})`
+          `   🛑 Entrada bloqueada por RiskManager (razón: ${riskDecision.reason})`,
         );
       }
       return;
@@ -237,38 +239,39 @@ async function handleMintEvent(redis, signal) {
     const solSize = riskDecision.size || POSITION_SIZE_SOL;
 
     console.log(
-      `   ✅ Entrada permitida (slot: ${riskDecision.slotType}) - Tamaño: ${solSize} SOL`
+      `   ✅ Entrada permitida (slot: ${
+        riskDecision.slotType || 'generic'
+      }) - Tamaño: ${solSize} SOL`,
     );
 
-    // 3) Si AUTO_TRADING está apagado, solo log + aviso Telegram opcional
+    // 3) Si AUTO_TRADING está apagado → solo señal / log
     if (!AUTO_TRADING) {
       console.log(
-        '   ⚠️ ENABLE_AUTO_TRADING=false → No se ejecuta trade (solo señal).'
+        '   ⚠️ ENABLE_AUTO_TRADING=false → Solo señal, no se ejecuta BUY.',
       );
 
       if (TELEGRAM_ALERT_ON_ENTRY && TELEGRAM_CHAT_ID) {
         await sendTelegramAlert(
           TELEGRAM_CHAT_ID,
-          `📡 [SIGNAL] Nuevo token Pump.fun (solo señal, sin ejecución)\n\n` +
+          `📡 [SIGNAL] Nuevo token Pump.fun (solo señal)\n\n` +
             `Token: ${name} (${symbol})\n` +
             `Mint: \`${mint}\`\n` +
-            `Price (SDK): ${entryPrice.toFixed(12)} SOL\n` +
+            `Precio (SDK): ${entryPrice.toFixed(12)} SOL\n` +
             `Bundle: ${bundleAmount.toFixed(4)} SOL\n` +
             `Liquidez virtual: ${virtualSolReserves.toFixed(3)} SOL\n\n` +
-            `Auto trading: OFF`
+            `Auto trading: OFF`,
         );
       }
 
-      // Aunque no se ejecute trade, marcamos último intento para cooldown
       lastEntryByMint.set(mint, now);
       return;
     }
 
-    // 4) Ejecutar BUY (PAPER o LIVE según DRY_RUN)
+    // 4) Ejecutar BUY (DRY_RUN o LIVE usando TradeExecutor)
     console.log(
       `   🛒 Ejecutando BUY ${DRY_RUN ? '[PAPER]' : '[LIVE]'}: ${
         solSize
-      } SOL en ${symbol} (${mint.slice(0, 8)})`
+      } SOL en ${symbol} (${mint.slice(0, 8)})`,
     );
 
     const buyResult = await tradeExecutor.buyToken(mint, solSize);
@@ -277,24 +280,23 @@ async function handleMintEvent(redis, signal) {
       console.log(
         `   ❌ Falló BUY para ${mint.slice(0, 8)}: ${
           buyResult?.error || 'unknown error'
-        }`
+        }`,
       );
       return;
     }
 
-    const tokensReceived = Number(buyResult.tokensReceived || 0);
+    const tokensReceived = Number(
+      buyResult.tokensReceived || buyResult.tokensOut || 0,
+    );
     const solSpent = Number(buyResult.solSpent || solSize);
 
     if (!tokensReceived || tokensReceived <= 0) {
       console.log(
-        `   ⚠️ BUY sin tokensReceived válidos para ${mint.slice(0, 8)}`
+        `   ⚠️ BUY sin tokensReceived válidos para ${mint.slice(0, 8)}`,
       );
       return;
     }
 
-    // entryPrice para almacenar en posición:
-    // - Preferimos el de PriceService si existe
-    // - Si tradeExecutor (paper) ya calculó entryPrice, se usa ese
     const storedEntryPrice =
       buyResult.entryPrice ||
       entryPrice ||
@@ -308,24 +310,23 @@ async function handleMintEvent(redis, signal) {
       storedEntryPrice,
       solSpent,
       tokensReceived,
-      buyResult.signature || 'unknown'
+      buyResult.signature || 'unknown',
     );
 
-    // Marcar entry_strategy = 'flintr' para que RiskManager lo cuente correctamente
+    // Marcar que la entrada viene del sniper Flintr
     try {
       await redis.hset(`position:${mint}`, 'entry_strategy', 'flintr');
     } catch (e) {
       console.error('⚠️ No se pudo marcar entry_strategy=flintr:', e.message);
     }
 
-    // Añadir cooldown
     lastEntryByMint.set(mint, now);
 
     console.log(
       `   ✅ Posición abierta: ${position.symbol} (${mint.slice(
         0,
-        8
-      )}) - ${solSpent.toFixed(4)} SOL → ${tokensReceived.toLocaleString()} tokens`
+        8,
+      )}) - ${solSpent.toFixed(4)} SOL → ${tokensReceived.toLocaleString()} tokens`,
     );
 
     if (TELEGRAM_ALERT_ON_ENTRY && TELEGRAM_CHAT_ID) {
@@ -338,7 +339,7 @@ async function handleMintEvent(redis, signal) {
           `Received: ${tokensReceived.toLocaleString()} tokens\n` +
           `Entry Price: ${storedEntryPrice.toFixed(12)} SOL\n` +
           `Bundle: ${bundleAmount.toFixed(4)} SOL\n` +
-          `Liquidez virtual: ${virtualSolReserves.toFixed(3)} SOL`
+          `Liquidez virtual: ${virtualSolReserves.toFixed(3)} SOL`,
       );
     }
   } catch (error) {
@@ -347,10 +348,9 @@ async function handleMintEvent(redis, signal) {
 }
 
 /**
- * Loop de riesgo básico:
- * - De momento, solo calcula PnL diario (para límites) y permite
- *   que RiskManager actualice sus métricas.
- * - La lógica de AUTO-SELL/EXIT se puede agregar luego (usando PositionManager + PriceService).
+ * Loop de riesgo sencillo:
+ * - Usa getDailyPnL() para respetar maxDailyLossSOL
+ * - Más adelante se puede extender para auto-sell
  */
 function startRiskLoop(redis) {
   if (!RISK_TICK_INTERVAL || RISK_TICK_INTERVAL <= 0) return;
@@ -362,12 +362,6 @@ function startRiskLoop(redis) {
         console.log(`📊 Daily PnL (Risk Loop): ${dailyPnL.toFixed(4)} SOL`);
       }
 
-      // Aquí más adelante se puede:
-      // - Leer todas las posiciones abiertas
-      // - Obtener precios actuales con priceService.getPriceWithFallback
-      // - Decidir cierres usando PositionManager.closePosition(...)
-      // Por ahora se deja como loop de monitoreo + límite de pérdidas diarias.
-
       await redis.set('sniper:last_risk_tick', Date.now().toString());
     } catch (error) {
       console.error('⚠️ Error en risk loop:', error.message);
@@ -376,7 +370,7 @@ function startRiskLoop(redis) {
 }
 
 /**
- * Inicia el WebSocket de Flintr y maneja reconexión
+ * WebSocket de Flintr + reconexión
  */
 function startFlintrWebSocket(redis) {
   if (!FLINTR_API_KEY) {
@@ -409,7 +403,6 @@ function startFlintrWebSocket(redis) {
 
         const eventClass = signal?.event?.class;
 
-        // Pings
         if (eventClass === 'ping') {
           if (VERBOSE_LOGGING) {
             console.log('📡 Flintr ping recibido');
@@ -442,7 +435,9 @@ function startFlintrWebSocket(redis) {
 
     ws.on('close', (code, reason) => {
       console.log(
-        `⚠️ Flintr WebSocket cerrado (code=${code}, reason=${reason?.toString?.() || ''})`
+        `⚠️ Flintr WebSocket cerrado (code=${code}, reason=${
+          reason?.toString?.() || ''
+        })`,
       );
       console.log(`   Reintentando en ${reconnectDelay / 1000}s...`);
       setTimeout(connect, reconnectDelay);
@@ -454,7 +449,7 @@ function startFlintrWebSocket(redis) {
 }
 
 /**
- * Punto de entrada público desde worker.js
+ * Punto de entrada público (lo llama worker.js)
  */
 export async function startSniperEngine(redis) {
   initCore(redis);
@@ -465,12 +460,12 @@ export async function startSniperEngine(redis) {
   console.log(`   Tamaño posición: ${POSITION_SIZE_SOL} SOL`);
   console.log(`   Max posiciones: ${MAX_POSITIONS}`);
   console.log(
-    `   Slots Flintr reservados: ${RESERVED_FLINTR_POSITIONS} / ${MAX_POSITIONS}`
+    `   Slots Flintr reservados: ${RESERVED_FLINTR_POSITIONS} / ${MAX_POSITIONS}`,
   );
   console.log(`   Min Liquidez (virtual): ${MIN_LIQUIDITY_SOL} SOL`);
   console.log(`   Min Bundle inicial: ${MIN_INITIAL_VOLUME_SOL} SOL`);
   console.log(
-    `   Cooldown por token: ${MIN_TIME_BETWEEN_SAME_TOKEN} segundos`
+    `   Cooldown por token: ${MIN_TIME_BETWEEN_SAME_TOKEN} segundos`,
   );
   console.log(`   ONLY_KING_OF_HILL: ${ONLY_KING_OF_HILL ? 'ON' : 'OFF'}`);
   console.log(`   Risk loop: cada ${RISK_TICK_INTERVAL} ms\n`);
