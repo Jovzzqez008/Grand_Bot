@@ -39,10 +39,13 @@ export class TradeExecutor {
       };
     }
 
-    // 🔐 Por seguridad: LIVE aún no implementado
     if (!this.dryRun) {
-      console.log('⚠️ TradeExecutor.buyToken LIVE solicitado, pero no está implementado.');
-      console.log('   Mantén DRY_RUN=true hasta integrar PumpPortal o Pump.fun program.');
+      console.log(
+        '⚠️ TradeExecutor.buyToken LIVE solicitado, pero no está implementado.'
+      );
+      console.log(
+        '   Mantén DRY_RUN=true hasta integrar PumpPortal o Pump.fun program.'
+      );
       return {
         success: false,
         error: 'live_trading_not_implemented',
@@ -50,9 +53,13 @@ export class TradeExecutor {
     }
 
     try {
-      console.log(`\n📝 [DRY_RUN] Simulando BUY: ${solAmount} SOL en mint ${mint.slice(0, 8)}...`);
+      console.log(
+        `\n📝 [DRY_RUN] Simulando BUY: ${solAmount} SOL en mint ${mint.slice(
+          0,
+          8
+        )}...`
+      );
 
-      // 1) Obtener precio desde bonding curve / SDK
       let entryPrice = 0;
       try {
         const priceData = await priceService.getPrice(mint, true);
@@ -60,15 +67,16 @@ export class TradeExecutor {
           entryPrice = Number(priceData.price);
         }
       } catch (e) {
-        console.log('⚠️ priceService.getPrice falló en buyToken:', e.message);
+        console.log(
+          '⚠️ priceService.getPrice falló en buyToken:',
+          e?.message || String(e)
+        );
       }
 
-      // 2) Fallback si no hay precio (caso raro)
       if (!entryPrice || entryPrice <= 0) {
-        // Valor arbitrario muy pequeño solo para que haya alguna cantidad de tokens
         entryPrice = 0.00000001;
         console.log(
-          `   ⚠️ No se pudo obtener precio real, usando fallback entryPrice=${entryPrice}`,
+          `   ⚠️ No se pudo obtener precio real, usando fallback entryPrice=${entryPrice}`
         );
       }
 
@@ -87,16 +95,19 @@ export class TradeExecutor {
 
       console.log(
         `   ✅ [DRY_RUN] BUY simulado → ${tokensReceived.toLocaleString()} tokens @ ${entryPrice.toFixed(
-          12,
-        )} SOL (mint ${mint.slice(0, 8)})`,
+          12
+        )} SOL (mint ${mint.slice(0, 8)})`
       );
 
       return result;
     } catch (error) {
-      console.error('❌ Error en buyToken (DRY_RUN):', error.message);
+      console.error(
+        '❌ Error en buyToken (DRY_RUN):',
+        error?.message || String(error)
+      );
       return {
         success: false,
-        error: error.message,
+        error: error?.message || String(error),
       };
     }
   }
@@ -121,10 +132,13 @@ export class TradeExecutor {
       };
     }
 
-    // 🔐 LIVE aún no implementado
     if (!this.dryRun) {
-      console.log('⚠️ TradeExecutor.sellToken LIVE solicitado, pero no está implementado.');
-      console.log('   Mantén DRY_RUN=true hasta integrar PumpPortal o Pump.fun program.');
+      console.log(
+        '⚠️ TradeExecutor.sellToken LIVE solicitado, pero no está implementado.'
+      );
+      console.log(
+        '   Mantén DRY_RUN=true hasta integrar PumpPortal o Pump.fun program.'
+      );
       return {
         success: false,
         error: 'live_trading_not_implemented',
@@ -135,8 +149,8 @@ export class TradeExecutor {
       console.log(
         `\n📝 [DRY_RUN] Simulando SELL: ${tokenAmount.toLocaleString()} tokens de ${mint.slice(
           0,
-          8,
-        )}...`,
+          8
+        )}...`
       );
 
       let solReceived = 0;
@@ -146,7 +160,7 @@ export class TradeExecutor {
       try {
         const valueData = await priceService.calculateCurrentValue(
           mint,
-          tokenAmount,
+          tokenAmount
         );
 
         if (valueData && valueData.solValue && valueData.marketPrice) {
@@ -157,17 +171,16 @@ export class TradeExecutor {
       } catch (e) {
         console.log(
           '⚠️ priceService.calculateCurrentValue falló en sellToken:',
-          e.message,
+          e?.message || String(e)
         );
       }
 
       if (!solReceived || solReceived <= 0) {
-        // Fallback mínimo: asumir precio simbólico (no afectará demasiado si se usa solo para stats)
         exitPrice = 0.00000001;
         solReceived = tokenAmount * exitPrice;
         source = 'fallback_min_price';
         console.log(
-          `   ⚠️ No se pudo obtener valor real, usando fallback exitPrice=${exitPrice}`,
+          `   ⚠️ No se pudo obtener valor real, usando fallback exitPrice=${exitPrice}`
         );
       }
 
@@ -184,17 +197,20 @@ export class TradeExecutor {
       };
 
       console.log(
-        `   ✅ [DRY_RUN] SELL simulado → ${solReceived.toFixed(6)} SOL @ ${exitPrice.toFixed(
-          12,
-        )} (source=${source})`,
+        `   ✅ [DRY_RUN] SELL simulado → ${solReceived.toFixed(
+          6
+        )} SOL @ ${exitPrice.toFixed(12)} (source=${source})`
       );
 
       return result;
     } catch (error) {
-      console.error('❌ Error en sellToken (DRY_RUN):', error.message);
+      console.error(
+        '❌ Error en sellToken (DRY_RUN):',
+        error?.message || String(error)
+      );
       return {
         success: false,
-        error: error.message,
+        error: error?.message || String(error),
       };
     }
   }
@@ -205,15 +221,11 @@ export class TradeExecutor {
    */
   async getBalance() {
     if (this.dryRun) {
-      // Simulamos que siempre hay suficiente saldo en paper mode
       return 999999;
     }
 
-    // TODO: cuando implementemos LIVE:
-    //  - Crear Connection con this.rpcUrl
-    //  - Obtener balance real de la wallet
     console.log(
-      '⚠️ getBalance LIVE no implementado todavía, devuelve 0 por seguridad.',
+      '⚠️ getBalance LIVE no implementado todavía, devuelve 0 por seguridad.'
     );
     return 0;
   }
