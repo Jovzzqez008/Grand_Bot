@@ -1,25 +1,52 @@
 {
-  "name": "pumpfun-sniper-bot",
-  "version": "1.0.0",
-  "description": "Pump.fun sniper bot using Flintr + bonding curve on-chain pricing, DRY_RUN with correct PnL.",
+  "name": "pumpfun-sniper-bot-improved",
+  "version": "2.0.0",
+  "description": "Pump.fun sniper bot mejorado con scoring inteligente, filtros anti-rug, position sizing dinámico y circuit breaker",
   "type": "module",
   "main": "server.js",
   "scripts": {
     "start": "node server.js",
     "worker": "node worker.js",
     "sniper": "node worker.js",
-    "test": "echo \"No tests configured\" && exit 0"
+    "dev": "node --watch server.js",
+    "test": "echo \"No tests configured\" && exit 0",
+    "lint": "eslint .",
+    "format": "prettier --write ."
   },
+  "keywords": [
+    "solana",
+    "pump.fun",
+    "sniper",
+    "trading-bot",
+    "crypto",
+    "flintr",
+    "automated-trading"
+  ],
   "dependencies": {
-    "@solana/web3.js": "^1.95.0",
+    "@solana/web3.js": "^1.95.3",
+    "bs58": "^5.0.0",
     "dotenv": "^16.4.5",
     "express": "^4.19.2",
     "ioredis": "^5.4.1",
     "node-telegram-bot-api": "^0.64.0",
     "ws": "^8.18.0"
   },
-  "engines": {
-    "node": ">=20.0.0"
+  "devDependencies": {
+    "eslint": "^8.57.0",
+    "prettier": "^3.2.5"
   },
-  "license": "MIT"
+  "engines": {
+    "node": ">=20.0.0",
+    "npm": ">=10.0.0"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/yourusername/pumpfun-sniper-bot.git"
+  },
+  "author": "Your Name",
+  "license": "MIT",
+  "bugs": {
+    "url": "https://github.com/yourusername/pumpfun-sniper-bot/issues"
+  },
+  "homepage": "https://github.com/yourusername/pumpfun-sniper-bot#readme"
 }
