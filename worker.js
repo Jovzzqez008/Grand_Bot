@@ -10,6 +10,12 @@ import { startSniperEngine } from './sniperEngine.js';
 console.log('🚀 Starting Pump.fun Sniper Worker...\n');
 const envCleaner = cleanAndValidateEnv();
 
+function parseBoolEnv(value, defaultValue = false) {
+  const v = (value || '').trim().toLowerCase();
+  if (!v) return defaultValue;
+  return v === 'true' || v === '1' || v === 'yes' || v === 'on';
+}
+
 async function startWorker() {
   // Verificar Redis
   if (!process.env.REDIS_URL) {
@@ -27,13 +33,13 @@ async function startWorker() {
     await redis.ping();
     console.log('✅ Redis connected for worker\n');
   } catch (error) {
-    console.log('❌ Redis connection failed:', error.message);
+    console.log('❌ Redis connection failed:', error?.message || String(error));
     return;
   }
 
   try {
     // Variables mínimas para operar sniper
-    const requiredVars = ['PRIVATE_KEY'];
+    const requiredVars = ['PRIVATE_KEY', 'RPC_URL', 'PUMP_PROGRAM_ID'];
     const missingVars = requiredVars.filter((v) => !process.env[v]);
 
     if (missingVars.length > 0) {
@@ -41,14 +47,14 @@ async function startWorker() {
       return;
     }
 
-    const dryRun = process.env.DRY_RUN !== 'false';
-    const autoTrading = process.env.ENABLE_AUTO_TRADING === 'true';
+    const dryRun = (process.env.DRY_RUN || '').trim().toLowerCase() !== 'false';
+    const autoTrading = parseBoolEnv(process.env.ENABLE_AUTO_TRADING, false);
 
     const positionSizeSol = parseFloat(process.env.POSITION_SIZE_SOL || '0.05');
-    const maxPositions = parseInt(process.env.MAX_POSITIONS || '3');
-    const minLiquiditySol = parseFloat(process.env.MIN_LIQUIDITY_SOL || '3');
+    const maxPositions = parseInt(process.env.MAX_POSITIONS || '3', 10);
+    const minLiquiditySol = parseFloat(process.env.MIN_LIQUIDITY_SOL || '2');
     const minInitialVolumeSol = parseFloat(process.env.MIN_INITIAL_VOLUME_SOL || '0');
-    const onlyKingOfHill = process.env.ONLY_KING_OF_HILL === 'true';
+    const onlyKingOfHill = parseBoolEnv(process.env.ONLY_KING_OF_HILL, false);
 
     console.log('📋 Sniper Configuration:');
     console.log(`   Mode: ${dryRun ? '📄 DRY RUN (Paper Trading)' : '💰 LIVE TRADING'}`);
@@ -58,7 +64,13 @@ async function startWorker() {
     console.log(`   Min Liquidity: ${minLiquiditySol} SOL`);
     console.log(`   Min Initial Volume: ${minInitialVolumeSol} SOL`);
     console.log(`   Only King Of Hill: ${onlyKingOfHill ? 'Yes' : 'No'}`);
-    console.log(`   Priority Fee: ${process.env.PRIORITY_FEE || process.env.PRIORITY_FEE_MICROLAMPORTS || 'default'}`);
+    console.log(
+      `   Priority Fee: ${
+        process.env.PRIORITY_FEE ||
+        process.env.PRIORITY_FEE_MICROLAMPORTS ||
+        'default'
+      }`,
+    );
     console.log('');
 
     if (!autoTrading) {
@@ -80,7 +92,7 @@ async function startWorker() {
     console.log('✅ Sniper Engine started\n');
 
     // Stats periódicos (usa RiskManager + Redis, igual que antes)
-    const statsIntervalMs = parseInt(process.env.RISK_TICK_INTERVAL || '120000');
+    const statsIntervalMs = parseInt(process.env.RISK_TICK_INTERVAL || '120000', 10);
 
     setInterval(async () => {
       try {
@@ -104,12 +116,12 @@ async function startWorker() {
             console.log(`   Biggest Win: ${stats.biggestWin} SOL`);
             console.log(`   Biggest Loss: ${stats.biggestLoss} SOL`);
           }
-        } catch (e) {
+        } catch {
           // Stats no disponibles aún
         }
 
         console.log('');
-      } catch (error) {
+      } catch {
         // silencioso para no spamear
       }
     }, statsIntervalMs);
@@ -117,21 +129,21 @@ async function startWorker() {
     console.log('✅ Pump.fun Sniper Worker is running');
     console.log('   Waiting for Flintr signals to snipe Pump.fun tokens...\n');
   } catch (error) {
-    console.log('❌ Worker setup failed:', error.message);
+    console.log('❌ Worker setup failed:', error?.message || String(error));
     process.exit(1);
   }
 }
 
 // Manejo de errores global
 process.on('unhandledRejection', (err) => {
-  console.log('Unhandled rejection:', err.message);
+  console.log('Unhandled rejection:', err?.message || String(err));
 });
 
 process.on('SIGINT', async () => {
   console.log('\n\n🛑 Shutting down worker...');
   try {
     // Aquí en el futuro podemos cerrar WebSocket de Flintr
-  } catch (e) {}
+  } catch {}
   console.log('✅ Worker stopped gracefully\n');
   process.exit(0);
 });
