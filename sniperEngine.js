@@ -1,4 +1,5 @@
-// sniperEngine.js - Flintr-based Pump.fun Sniper Core (DRY_RUN + PnL correcto + AUTO SELL)
+// sniperEngine.js - Flintr-based Pump.fun Sniper Core
+// ✅ DRY_RUN + PnL correcto + AUTO SELL + STAGNATION EXIT
 
 import WebSocket from 'ws';
 import { getPriceService } from './priceService.js';
@@ -57,6 +58,16 @@ const VERBOSE_LOGGING =
 const RISK_TICK_INTERVAL = parseInt(
   process.env.RISK_TICK_INTERVAL || '5000',
   10,
+);
+
+// 🔥 CONFIGURACIÓN DE SALIDA POR ESTANCAMIENTO (STAGNATION EXIT) 🔥
+// Si pasan X segundos y el PnL es menor a Y%, vender automáticamente.
+const STAGNATION_TIME_SEC = parseInt(
+  process.env.STAGNATION_TIME_SEC || '300', // 5 minutos por defecto
+  10,
+);
+const STAGNATION_PNL_THRESHOLD = parseFloat(
+  process.env.STAGNATION_PNL_THRESHOLD || '5', // Si en 5 min no llevas +5%, vende
 );
 
 // Mapa para cooldown por mint
@@ -278,9 +289,7 @@ async function handleMintEvent(redis, signal) {
 
     // 4) Ejecutar BUY (DRY_RUN o LIVE usando TradeExecutor)
     console.log(
-      `   🛒 Ejecutando BUY ${DRY_RUN ? '[PAPER]' : '[LIVE]'}: ${
-        solSize
-      } SOL en ${symbol} (${mint.slice(0, 8)})`,
+      `   🛒 Ejecutando BUY ${DRY_RUN ? '[PAPER]' : '[LIVE]'}: ${solSize} SOL en ${symbol} (${mint.slice(0, 8)})`,
     );
 
     const buyResult = await tradeExecutor.buyToken(mint, solSize);
@@ -357,31 +366,35 @@ async function handleMintEvent(redis, signal) {
 }
 
 /**
- * Loop de riesgo ACTIVO y MEJORADO:
- * - Revisa posiciones abiertas cada RISK_TICK_INTERVAL
- * - Comprueba Stop Loss y Take Profit
- * - Ejecuta ventas automáticas (Simuladas en DRY_RUN)
+ * 🔥 LOOP DE RIESGO MEJORADO CON STAGNATION EXIT 🔥
+ * 
+ * Revisa posiciones abiertas cada RISK_TICK_INTERVAL y ejecuta:
+ * 1. Stop Loss (-X%)
+ * 2. Take Profit (+Y%)
+ * 3. Trailing Stop (caída desde peak)
+ * 4. 💀 STAGNATION EXIT: Si llevamos mucho tiempo sin ganancias significativas
  */
 function startRiskLoop(redis) {
   if (!RISK_TICK_INTERVAL || RISK_TICK_INTERVAL <= 0) return;
 
   console.log(`🛡️ Iniciando Monitor de Riesgo (Tick: ${RISK_TICK_INTERVAL}ms)`);
+  console.log(`   💀 Stagnation Exit: >${STAGNATION_TIME_SEC}s sin >= +${STAGNATION_PNL_THRESHOLD}%`);
+  console.log('');
 
   setInterval(async () => {
     try {
-      // 1. Obtener posiciones abiertas desde Redis (usando positionManager)
       if (!positionManager) return;
       const positions = await positionManager.getOpenPositions();
       
-      // Si no hay posiciones, solo actualizamos timestamp para indicar actividad
       if (positions.length === 0) {
         await redis.set('sniper:last_risk_tick', Date.now().toString());
         return;
       }
 
-      // Leer porcentajes configurados en ENV
+      // Leer configuración de porcentajes de salida
       const stopLossPct = parseFloat(process.env.STOP_LOSS_PERCENT || '13');
       const takeProfitPct = parseFloat(process.env.TAKE_PROFIT_PERCENT || '30');
+      const trailingStopPct = parseFloat(process.env.TRAILING_STOP_PERCENT || '15');
 
       if (VERBOSE_LOGGING) {
         console.log(`🔍 Monitor de Riesgo: Revisando ${positions.length} posiciones...`);
@@ -391,75 +404,105 @@ function startRiskLoop(redis) {
         // Validar datos mínimos de la posición
         if (!pos.mint || !pos.entryPrice || !pos.tokensAmount) continue;
 
-        // 2. Obtener precio actual REAL (con fallback al entry si falla RPC)
+        // Obtener precio actual REAL (con fallback al entry si falla RPC)
         const priceData = await priceService.getPriceWithFallback(pos.mint);
         
-        // Si no conseguimos precio válido, pasamos al siguiente
         if (!priceData || !priceData.price) continue;
 
         const currentPrice = priceData.price;
         const entryPrice = parseFloat(pos.entryPrice);
+        const maxPrice = parseFloat(pos.maxPrice || entryPrice); // Precio máximo histórico
         const tokensAmount = parseFloat(pos.tokensAmount);
+        const entryTime = parseInt(pos.entryTime || Date.now());
 
-        // 3. Calcular PnL % actual
+        // Cálculos de rendimiento
         const pnlPercent = ((currentPrice - entryPrice) / entryPrice) * 100;
-        
-        // Actualizar el precio máximo alcanzado (para futuro Trailing Stop)
-        await positionManager.updateMaxPrice(pos.mint, currentPrice);
+        const drawdownFromPeak = ((currentPrice - maxPrice) / maxPrice) * 100; // Caída desde pico
+        const holdTimeSec = (Date.now() - entryTime) / 1000; // Tiempo sosteniendo posición
+
+        // Actualizar precio máximo alcanzado si es mayor
+        if (currentPrice > maxPrice) {
+          await positionManager.updateMaxPrice(pos.mint, currentPrice);
+        }
 
         let triggerSell = false;
         let sellReason = '';
 
-        // 4. Evaluar condiciones de salida
+        // ═══════════════════════════════════════════════════════
+        // 1️⃣ STOP LOSS: Pérdida máxima aceptable
+        // ═══════════════════════════════════════════════════════
         if (pnlPercent <= -stopLossPct) {
-            triggerSell = true;
-            sellReason = `🛑 STOP LOSS triggered (${pnlPercent.toFixed(2)}% <= -${stopLossPct}%)`;
-        } else if (pnlPercent >= takeProfitPct) {
-            triggerSell = true;
-            sellReason = `✅ TAKE PROFIT triggered (${pnlPercent.toFixed(2)}% >= ${takeProfitPct}%)`;
+          triggerSell = true;
+          sellReason = `🛑 STOP LOSS (${pnlPercent.toFixed(2)}% <= -${stopLossPct}%)`;
+        } 
+        // ═══════════════════════════════════════════════════════
+        // 2️⃣ TAKE PROFIT: Objetivo de ganancia alcanzado
+        // ═══════════════════════════════════════════════════════
+        else if (pnlPercent >= takeProfitPct) {
+          triggerSell = true;
+          sellReason = `✅ TAKE PROFIT (${pnlPercent.toFixed(2)}% >= ${takeProfitPct}%)`;
+        }
+        // ═══════════════════════════════════════════════════════
+        // 3️⃣ TRAILING STOP: Caída significativa desde el pico
+        // ═══════════════════════════════════════════════════════
+        else if (drawdownFromPeak <= -trailingStopPct) {
+          triggerSell = true;
+          sellReason = `📉 TRAILING STOP (Peak: ${maxPrice.toFixed(9)} → Curr: ${currentPrice.toFixed(9)} | Drop: ${drawdownFromPeak.toFixed(2)}%)`;
+        }
+        // ═══════════════════════════════════════════════════════
+        // 4️⃣ 💀 STAGNATION EXIT: Mucho tiempo sin ganancias suficientes
+        // Si llevamos más de STAGNATION_TIME_SEC segundos y no hemos
+        // alcanzado al menos STAGNATION_PNL_THRESHOLD% de ganancia,
+        // cortamos pérdidas y liberamos capital.
+        // ═══════════════════════════════════════════════════════
+        else if (holdTimeSec > STAGNATION_TIME_SEC && pnlPercent < STAGNATION_PNL_THRESHOLD) {
+          triggerSell = true;
+          sellReason = `💀 STAGNATION EXIT (Hold: ${Math.floor(holdTimeSec)}s > ${STAGNATION_TIME_SEC}s & PnL: ${pnlPercent.toFixed(2)}% < ${STAGNATION_PNL_THRESHOLD}%)`;
         }
 
-        // 5. Ejecutar VENTA AUTOMÁTICA si corresponde
+        // ═══════════════════════════════════════════════════════
+        // EJECUTAR VENTA AUTOMÁTICA
+        // ═══════════════════════════════════════════════════════
         if (triggerSell && tradeExecutor) {
-            console.log(`⚡ AUTO-SELL: ${sellReason} para ${pos.symbol} (${pos.mint})...`);
+          console.log(`⚡ AUTO-SELL: ${sellReason} para ${pos.symbol} (${pos.mint.slice(0, 8)})...`);
+          
+          // Ejecutar venta (tradeExecutor maneja si es DRY_RUN o LIVE)
+          const sellResult = await tradeExecutor.sellToken(pos.mint, tokensAmount);
+
+          if (sellResult && sellResult.success) {
+            const solReceived = parseFloat(sellResult.solReceived || '0');
             
-            // Ejecutar venta (tradeExecutor maneja si es DRY_RUN o LIVE)
-            const sellResult = await tradeExecutor.sellToken(pos.mint, tokensAmount);
+            // Cerrar posición en Base de Datos (Redis)
+            await positionManager.closePosition(
+              pos.mint,
+              currentPrice,
+              tokensAmount,
+              solReceived,
+              sellReason,
+              sellResult.signature || 'AUTO_SELL_BOT'
+            );
 
-            if (sellResult && sellResult.success) {
-                const solReceived = parseFloat(sellResult.solReceived || '0');
-                
-                // Cerrar posición en Base de Datos (Redis)
-                await positionManager.closePosition(
-                    pos.mint,
-                    currentPrice,
-                    tokensAmount,
-                    solReceived,
-                    sellReason,
-                    sellResult.signature || 'AUTO_SELL_BOT'
-                );
-
-                // Enviar alerta a Telegram
-                if (TELEGRAM_CHAT_ID) {
-                    const modeTxt = DRY_RUN ? '[PAPER]' : '[LIVE]';
-                    // Usamos emoji distinto para ganancia o pérdida
-                    const emoji = pnlPercent > 0 ? '🤑' : '🔻';
-                    const solProfit = solReceived - parseFloat(pos.solAmount || '0');
-                    
-                    await sendTelegramAlert(
-                        TELEGRAM_CHAT_ID,
-                        `${emoji} **AUTO SELL ${modeTxt}**\n\n` +
-                        `Token: ${pos.symbol}\n` +
-                        `Reason: ${sellReason}\n` +
-                        `PnL: ${pnlPercent.toFixed(2)}%\n` +
-                        `Entry: ${entryPrice.toFixed(10)}\n` +
-                        `Exit: ${currentPrice.toFixed(10)}\n` +
-                        `Profit: ${solProfit.toFixed(4)} SOL`
-                    );
-                }
-            } else {
-                console.error(`❌ Error ejecutando auto-sell para ${pos.symbol}: ${sellResult?.error}`);
+            // Enviar alerta a Telegram
+            if (TELEGRAM_CHAT_ID) {
+              const modeTxt = DRY_RUN ? '[PAPER]' : '[LIVE]';
+              const emoji = pnlPercent > 0 ? '🤑' : '🔻';
+              const solProfit = solReceived - parseFloat(pos.solAmount || '0');
+              
+              await sendTelegramAlert(
+                TELEGRAM_CHAT_ID,
+                `${emoji} **AUTO SELL ${modeTxt}**\n\n` +
+                `Token: ${pos.symbol}\n` +
+                `Reason: ${sellReason}\n` +
+                `PnL: ${pnlPercent.toFixed(2)}%\n` +
+                `Entry: ${entryPrice.toFixed(10)}\n` +
+                `Exit: ${currentPrice.toFixed(10)}\n` +
+                `Hold Time: ${Math.floor(holdTimeSec)}s\n` +
+                `Profit: ${solProfit.toFixed(4)} SOL`
+              );
             }
+          } else {
+            console.error(`❌ Error ejecutando auto-sell para ${pos.symbol}: ${sellResult?.error}`);
+          }
         }
       }
 
@@ -473,7 +516,7 @@ function startRiskLoop(redis) {
 }
 
 /**
- * WebSocket de Flintr + reconexión
+ * WebSocket de Flintr + reconexión automática
  */
 function startFlintrWebSocket(redis) {
   if (!FLINTR_API_KEY) {
@@ -485,7 +528,6 @@ function startFlintrWebSocket(redis) {
   let reconnectDelay = 5000;
 
   const connect = () => {
-    // Endpoint correcto según docs de Flintr
     const url = `wss://api-v1.flintr.io/sub?token=${FLINTR_API_KEY}`;
     console.log(`\n🌐 Conectando a Flintr WebSocket: ${url}`);
 
@@ -564,7 +606,7 @@ function startFlintrWebSocket(redis) {
 export async function startSniperEngine(redis) {
   initCore(redis);
 
-  console.log('\n🎯 Pump.fun Sniper inicializado');
+  console.log('\n🎯 Pump.fun Sniper inicializado con Stagnation Exit');
   console.log(`   Modo: ${DRY_RUN ? '📄 PAPER' : '💰 LIVE'}`);
   console.log(`   Auto Trading: ${AUTO_TRADING ? 'ON' : 'OFF'}`);
   console.log(`   Tamaño posición: ${POSITION_SIZE_SOL} SOL`);
@@ -578,7 +620,8 @@ export async function startSniperEngine(redis) {
     `   Cooldown por token: ${MIN_TIME_BETWEEN_SAME_TOKEN} segundos`,
   );
   console.log(`   ONLY_KING_OF_HILL: ${ONLY_KING_OF_HILL ? 'ON' : 'OFF'}`);
-  console.log(`   Risk loop: cada ${RISK_TICK_INTERVAL} ms\n`);
+  console.log(`   Risk loop: cada ${RISK_TICK_INTERVAL} ms`);
+  console.log(`   💀 Stagnation: ${STAGNATION_TIME_SEC}s @ <${STAGNATION_PNL_THRESHOLD}%\n`);
 
   startFlintrWebSocket(redis);
   startRiskLoop(redis);
