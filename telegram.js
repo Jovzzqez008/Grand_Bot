@@ -5,7 +5,8 @@ import IORedis from 'ioredis';
 import { getPriceService } from './priceService.js';
 
 const BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN;
-const OWNER_CHAT_ID = process.env.TELEGRAM_OWNER_CHAT_ID || process.env.TELEGRAM_CHAT_ID;
+const OWNER_CHAT_ID =
+  process.env.TELEGRAM_OWNER_CHAT_ID || process.env.TELEGRAM_CHAT_ID;
 
 let bot;
 let redis;
@@ -61,6 +62,13 @@ export async function initTelegram() {
         maxRetriesPerRequest: null,
         retryDelayOnFailover: 100,
       });
+
+      redis.on('error', (err) => {
+        console.log(
+          '⚠️ Telegram Redis error:',
+          err?.message || String(err),
+        );
+      });
     }
 
     console.log('✅ Telegram bot initialized (Pump.fun Sniper Mode)');
@@ -90,7 +98,7 @@ export async function initTelegram() {
           `💰 Trading (Sniper / Flintr):\n` +
           `/sell MINT  - Cerrar UNA posición (simulado si DRY_RUN)\n` +
           `/sell_all   - Cerrar TODAS las posiciones (simulado si DRY_RUN)\n\n` +
-          `ℹ️ Copy trading está DESACTIVADO. Solo se usan señales de Flintr y el motor sniper.`
+          `ℹ️ Copy trading está DESACTIVADO. Solo se usan señales de Flintr y el motor sniper.`,
       );
     });
 
@@ -121,7 +129,7 @@ export async function initTelegram() {
         }
 
         const sniperPositions = openPositions.filter(
-          (p) => p.entry_strategy === 'flintr' || p.strategy === 'flintr'
+          (p) => p.entry_strategy === 'flintr' || p.strategy === 'flintr',
         );
 
         let totalSolSpent = 0;
@@ -134,7 +142,7 @@ export async function initTelegram() {
 
           const valueData = await priceService.calculateCurrentValue(
             pos.mint,
-            tokensAmount
+            tokensAmount,
           );
           if (!valueData || !valueData.solValue) continue;
 
@@ -164,10 +172,13 @@ export async function initTelegram() {
             `Total Open Positions (cualquier estrategia): ${openPositions.length}\n\n` +
             `💰 Unrealized P&L (solo Flintr): ${unrealizedPnL.toFixed(4)} SOL\n\n` +
             `📈 Today's Performance (realizado):\n` +
-            `${statsText}`
+            `${statsText}`,
         );
       } catch (error) {
-        await safeSend(chatId, `❌ Error: ${error?.message || String(error)}`);
+        await safeSend(
+          chatId,
+          `❌ Error: ${error?.message || String(error)}`,
+        );
       }
     });
 
@@ -187,14 +198,14 @@ export async function initTelegram() {
         const positions = await positionManager.getOpenPositions();
 
         const sniperPositions = positions.filter(
-          (p) => p.entry_strategy === 'flintr' || p.strategy === 'flintr'
+          (p) => p.entry_strategy === 'flintr' || p.strategy === 'flintr',
         );
 
         if (sniperPositions.length === 0) {
           return safeSend(
             chatId,
             '🔭 No hay posiciones abiertas del sniper (Flintr).\n\n' +
-              'Espera a que lleguen nuevas señales y el bot abra entradas.'
+              'Espera a que lleguen nuevas señales y el bot abra entradas.',
           );
         }
 
@@ -207,7 +218,9 @@ export async function initTelegram() {
           const tokensAmount = parseInt(pos.tokensAmount || '0', 10);
           const entryTime = parseInt(pos.entryTime || '0', 10);
 
-          if (!entryPrice || !solAmount || !tokensAmount || !entryTime) continue;
+          if (!entryPrice || !solAmount || !tokensAmount || !entryTime) {
+            continue;
+          }
 
           const priceData = await priceService.getPriceWithFallback(pos.mint);
           let currentPrice = entryPrice;
@@ -232,7 +245,7 @@ export async function initTelegram() {
           message += `Entry: ${entryPrice.toFixed(10)}\n`;
           message += `Current: ${currentPrice.toFixed(10)}\n`;
           message += `PnL: ${pnlPercent.toFixed(2)}% | ${pnlSOL.toFixed(
-            4
+            4,
           )} SOL\n`;
           message += `Hold: ${holdTimeSec}s\n`;
           message += `/sell ${pos.mint.slice(0, 8)}\n\n`;
@@ -240,7 +253,10 @@ export async function initTelegram() {
 
         await safeSend(chatId, message);
       } catch (error) {
-        await safeSend(chatId, `❌ Error: ${error?.message || String(error)}`);
+        await safeSend(
+          chatId,
+          `❌ Error: ${error?.message || String(error)}`,
+        );
       }
     });
 
@@ -254,7 +270,7 @@ export async function initTelegram() {
         return safeSend(chatId, '❌ Redis no está configurado para Telegram.');
       }
 
-      const mintArg = match[1]?.trim();
+      const mintArg = match?.[1]?.trim();
 
       if (!mintArg) {
         return safeSend(
@@ -262,14 +278,14 @@ export async function initTelegram() {
           `💰 Manual Sell (Sniper)\n\n` +
             `Uso: /sell MINT\n` +
             `Ejemplo: /sell 7xKXtGH4\n\n` +
-            `Usa /positions para ver las posiciones abiertas.`
+            `Usa /positions para ver las posiciones abiertas.`,
         );
       }
 
       try {
         await safeSend(
           chatId,
-          '⏳ Procesando venta manual (simulada si DRY_RUN)...'
+          '⏳ Procesando venta manual (simulada si DRY_RUN)...',
         );
 
         const openMints = await redis.smembers('open_positions');
@@ -283,7 +299,10 @@ export async function initTelegram() {
         }
 
         if (!targetMint) {
-          return safeSend(chatId, `❌ No se encontró posición para: ${mintArg}`);
+          return safeSend(
+            chatId,
+            `❌ No se encontró posición para: ${mintArg}`,
+          );
         }
 
         const position = await redis.hgetall(`position:${targetMint}`);
@@ -299,7 +318,7 @@ export async function initTelegram() {
           return safeSend(
             chatId,
             `⚠️ Esta posición no es del sniper (Flintr).\n` +
-              `Por seguridad, solo se permite /sell en posiciones del sniper.`
+              `Por seguridad, solo se permite /sell en posiciones del sniper.`,
           );
         }
 
@@ -310,13 +329,13 @@ export async function initTelegram() {
         if (!entryPrice || !solAmount || !tokensAmount) {
           return safeSend(
             chatId,
-            `❌ Datos incompletos de la posición, no se puede cerrar.`
+            `❌ Datos incompletos de la posición, no se puede cerrar.`,
           );
         }
 
         const valueData = await priceService.calculateCurrentValue(
           targetMint,
-          tokensAmount
+          tokensAmount,
         );
 
         let exitPrice = entryPrice;
@@ -341,7 +360,7 @@ export async function initTelegram() {
           tokensAmount,
           solReceived,
           'telegram_manual_sell',
-          'TELEGRAM_SIMULATED'
+          'TELEGRAM_SIMULATED',
         );
 
         const dryRun =
@@ -357,10 +376,13 @@ export async function initTelegram() {
             `Entry: ${entryPrice.toFixed(10)}\n` +
             `Exit: ${exitPrice.toFixed(10)}\n\n` +
             `💰 PnL: ${pnlPercent.toFixed(2)}%\n` +
-            `Amount: ${pnlSOL.toFixed(4)} SOL\n`
+            `Amount: ${pnlSOL.toFixed(4)} SOL\n`,
         );
       } catch (error) {
-        await safeSend(chatId, `❌ Error: ${error?.message || String(error)}`);
+        await safeSend(
+          chatId,
+          `❌ Error: ${error?.message || String(error)}`,
+        );
       }
     });
 
@@ -377,7 +399,7 @@ export async function initTelegram() {
       try {
         await safeSend(
           chatId,
-          '⏳ Cerrando TODAS las posiciones del sniper (simulado si DRY_RUN)...'
+          '⏳ Cerrando TODAS las posiciones del sniper (simulado si DRY_RUN)...',
         );
 
         const { PositionManager } = await import('./riskManager.js');
@@ -388,11 +410,14 @@ export async function initTelegram() {
           (p) =>
             p.entry_strategy === 'flintr' ||
             p.strategy === 'flintr' ||
-            p.strategy === 'sniper'
+            p.strategy === 'sniper',
         );
 
         if (sniperPositions.length === 0) {
-          return safeSend(chatId, '🔭 No hay posiciones del sniper para cerrar.');
+          return safeSend(
+            chatId,
+            '🔭 No hay posiciones del sniper para cerrar.',
+          );
         }
 
         let closed = 0;
@@ -411,7 +436,7 @@ export async function initTelegram() {
 
             const valueData = await priceService.calculateCurrentValue(
               pos.mint,
-              tokensAmount
+              tokensAmount,
             );
 
             let exitPrice = entryPrice;
@@ -428,7 +453,7 @@ export async function initTelegram() {
               tokensAmount,
               solReceived,
               'telegram_manual_sell_all',
-              'TELEGRAM_SIMULATED'
+              'TELEGRAM_SIMULATED',
             );
             closed++;
           } catch (e) {
@@ -441,10 +466,13 @@ export async function initTelegram() {
           `✅ SELL ALL (Sniper / Flintr)\n\n` +
             `Closed: ${closed}\n` +
             `Failed: ${failed}\n\n` +
-            `ℹ️ En DRY_RUN esto es solo actualización de P&L, no se envían transacciones.`
+            `ℹ️ En DRY_RUN esto es solo actualización de P&L, no se envían transacciones.`,
         );
       } catch (error) {
-        await safeSend(chatId, `❌ Error: ${error?.message || String(error)}`);
+        await safeSend(
+          chatId,
+          `❌ Error: ${error?.message || String(error)}`,
+        );
       }
     });
 
@@ -476,10 +504,13 @@ export async function initTelegram() {
             `Realized P&L: ${stats.totalPnL} SOL\n` +
             `Avg P&L: ${stats.avgPnL} SOL\n` +
             `Best: ${stats.biggestWin} SOL\n` +
-            `Worst: ${stats.biggestLoss} SOL\n`
+            `Worst: ${stats.biggestLoss} SOL\n`,
         );
       } catch (error) {
-        await safeSend(chatId, `❌ Error: ${error?.message || String(error)}`);
+        await safeSend(
+          chatId,
+          `❌ Error: ${error?.message || String(error)}`,
+        );
       }
     });
 
@@ -487,14 +518,17 @@ export async function initTelegram() {
     // Errores de polling
     // ═════════════════════════════════════════════════════
     bot.on('polling_error', (error) => {
-      console.log('Telegram polling error:', error?.message || String(error));
+      console.log(
+        'Telegram polling error:',
+        error?.message || String(error),
+      );
     });
 
     console.log('✅ Telegram sniper commands registered');
   } catch (error) {
     console.error(
       '❌ Failed to initialize Telegram bot:',
-      error?.message || String(error)
+      error?.message || String(error),
     );
   }
 }
