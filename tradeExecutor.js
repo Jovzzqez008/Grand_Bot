@@ -3,6 +3,7 @@
 // ✅ Cálculo exacto de PnL (incluyendo 1.5% fees totales + Priority Fees)
 // ✅ Retry automático en transacciones
 // ✅ Validaciones pre-trade
+// ✅ INTEGRACIÓN API KEY PUMP PORTAL
 
 import {
   Connection,
@@ -36,6 +37,9 @@ export class TradeExecutor {
     this.rpcUrl = rpcUrl;
     this.connection = new Connection(rpcUrl, 'confirmed');
     
+    // Cargar API Key de PumpPortal (Investigación: Se requiere para trade-local)
+    this.apiKey = process.env.PUMPPORTAL_API_KEY;
+
     // Solo parsear keypair si NO está en DRY_RUN
     if (!this.dryRun && privateKey) {
       try {
@@ -44,6 +48,11 @@ export class TradeExecutor {
       } catch (error) {
         console.error('❌ Error cargando wallet:', error?.message);
         throw new Error('Invalid PRIVATE_KEY format');
+      }
+
+      // Advertencia si falta la API Key en modo LIVE
+      if (!this.apiKey) {
+        console.warn('⚠️ ADVERTENCIA: No tienes PUMPPORTAL_API_KEY en tu .env. Las transacciones LIVE fallarán (401 Unauthorized).');
       }
     } else {
       this.wallet = null;
@@ -61,6 +70,7 @@ export class TradeExecutor {
     console.log(`🔧 TradeExecutor inicializado:`);
     console.log(`   Modo: ${this.dryRun ? 'PAPER' : 'LIVE'}`);
     console.log(`   Priority Fee: ${this.priorityFee} SOL`);
+    console.log(`   API Key Portal: ${this.apiKey ? '✅ Configurada' : '❌ No detectada'}`);
     console.log(`   Fees Estructurales: ${(TOTAL_TRADE_FEE * 100).toFixed(1)}% por trade (Pump + Portal)`);
     console.log(`   Slippage: Buy ${this.slippageBuyPct}% / Sell ${this.slippageSellPct}%`);
   }
@@ -147,6 +157,12 @@ export class TradeExecutor {
     if (!this.wallet) {
       console.error('❌ No wallet configurada para LIVE trading');
       return { success: false, error: 'no_wallet' };
+    }
+
+    // Validar API Key antes de intentar nada
+    if (!this.apiKey) {
+      console.error('❌ Error: PUMPPORTAL_API_KEY faltante en .env');
+      return { success: false, error: 'missing_api_key' };
     }
 
     try {
@@ -284,6 +300,10 @@ export class TradeExecutor {
     if (!this.wallet) {
       return { success: false, error: 'no_wallet' };
     }
+    
+    if (!this.apiKey) {
+      return { success: false, error: 'missing_api_key' };
+    }
 
     try {
       console.log(`\n💰 [LIVE] Vendiendo ${tokenAmount.toLocaleString()} tokens de ${mint.slice(0, 8)}...`);
@@ -364,11 +384,12 @@ export class TradeExecutor {
 
   /**
    * Construir transacción de BUY via PumpPortal API
+   * ✅ ACTUALIZADO: Incluye api-key en la query string
    */
   async _buildBuyTransaction(mint, solAmount, slippageBps) {
     try {
-      // Endpoint Local Trade (0.5% fee)
-      const url = `${PUMPPORTAL_API}/trade-local`;
+      // Endpoint Local Trade (0.5% fee) + API KEY
+      const url = `${PUMPPORTAL_API}/trade-local?api-key=${this.apiKey}`;
       
       const payload = {
         publicKey: this.wallet.publicKey.toBase58(),
@@ -403,10 +424,12 @@ export class TradeExecutor {
 
   /**
    * Construir transacción de SELL via PumpPortal API
+   * ✅ ACTUALIZADO: Incluye api-key en la query string
    */
   async _buildSellTransaction(mint, tokenAmount, slippageBps) {
     try {
-      const url = `${PUMPPORTAL_API}/trade-local`;
+      // Endpoint Local Trade + API KEY
+      const url = `${PUMPPORTAL_API}/trade-local?api-key=${this.apiKey}`;
       
       const payload = {
         publicKey: this.wallet.publicKey.toBase58(),
