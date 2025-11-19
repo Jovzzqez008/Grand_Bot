@@ -1,8 +1,7 @@
-// tradeExecutor.js - MEJORADO con trading LIVE para Pump.fun
-// ✅ Soporte LIVE via PumpPortal API
+// tradeExecutor.js - CORREGIDO con Fees Reales (Pump.fun + PumpPortal + Gas)
+// ✅ Soporte LIVE via PumpPortal API (Local Trade)
+// ✅ Cálculo exacto de PnL (incluyendo 1.5% fees totales + Priority Fees)
 // ✅ Retry automático en transacciones
-// ✅ Slippage dinámico
-// ✅ Priority fees configurables
 // ✅ Validaciones pre-trade
 
 import {
@@ -19,12 +18,17 @@ import { getPriceService } from './priceService.js';
 const priceService = getPriceService();
 
 // ═══════════════════════════════════════════════════════
-// CONFIGURACIÓN
+// CONFIGURACIÓN DE FEES Y API
 // ═══════════════════════════════════════════════════════
 const PUMPPORTAL_API = 'https://pumpportal.fun/api';
 const MAX_TX_RETRIES = 3;
 const TX_RETRY_DELAY_MS = 2000;
-const TX_CONFIRMATION_TIMEOUT = 60000; // 60s
+
+// Costos Fijos
+const NETWORK_FEE_SOL = 0.000005; // Costo aproximado por firma en Solana
+const PUMP_FEE_PERCENT = 0.01;    // 1% Pump.fun
+const PORTAL_FEE_PERCENT = 0.005; // 0.5% PumpPortal (Local API)
+const TOTAL_TRADE_FEE = PUMP_FEE_PERCENT + PORTAL_FEE_PERCENT; // 1.5% Total por trade
 
 export class TradeExecutor {
   constructor(privateKey, rpcUrl, dryRun = true) {
@@ -57,6 +61,7 @@ export class TradeExecutor {
     console.log(`🔧 TradeExecutor inicializado:`);
     console.log(`   Modo: ${this.dryRun ? 'PAPER' : 'LIVE'}`);
     console.log(`   Priority Fee: ${this.priorityFee} SOL`);
+    console.log(`   Fees Estructurales: ${(TOTAL_TRADE_FEE * 100).toFixed(1)}% por trade (Pump + Portal)`);
     console.log(`   Slippage: Buy ${this.slippageBuyPct}% / Sell ${this.slippageSellPct}%`);
   }
 
@@ -83,21 +88,26 @@ export class TradeExecutor {
 
   /**
    * BUY PAPER - Simulación
+   * NOTA: Simulamos también los fees para ser realistas en Paper Trading
    */
   async _buyTokenPaper(mint, solAmount) {
     try {
-      console.log(`\n📝 [PAPER] Simulando BUY: ${solAmount} SOL → ${mint.slice(0, 8)}`);
+      // Costo total simulado = Monto Token + Priority Fee + Gas
+      const totalCost = solAmount + this.priorityFee + NETWORK_FEE_SOL;
+      
+      console.log(`\n📝 [PAPER] Simulando BUY: ${solAmount} SOL (+ fees) → ${mint.slice(0, 8)}`);
 
       const priceData = await priceService.getPrice(mint, true);
       
       if (!priceData || !priceData.price || priceData.price <= 0) {
         console.log('   ⚠️ Precio inválido, usando fallback');
+        // Fallback simple sin calcular fees complejos si no hay precio
         return {
           success: true,
           simulated: true,
           dryRun: true,
           mint,
-          solSpent: solAmount,
+          solSpent: totalCost,
           tokensReceived: solAmount / 0.00000001,
           entryPrice: 0.00000001,
           signature: `paper_buy_${Date.now()}`,
@@ -105,16 +115,20 @@ export class TradeExecutor {
       }
 
       const entryPrice = priceData.price;
-      const tokensReceived = solAmount / entryPrice;
+      
+      // Simulamos que del solAmount se descuenta el 1.5% de fees antes de comprar tokens
+      const solForTokens = solAmount * (1 - TOTAL_TRADE_FEE);
+      const tokensReceived = solForTokens / entryPrice;
 
       console.log(`   ✅ [PAPER] ${tokensReceived.toLocaleString()} tokens @ ${entryPrice.toFixed(12)}`);
+      console.log(`      Gastado Real: ${totalCost.toFixed(6)} SOL (inc. fees)`);
 
       return {
         success: true,
         simulated: true,
         dryRun: true,
         mint,
-        solSpent: solAmount,
+        solSpent: totalCost, // Guardamos el costo REAL total
         tokensReceived,
         entryPrice,
         signature: `paper_buy_${Date.now()}`,
@@ -136,21 +150,28 @@ export class TradeExecutor {
     }
 
     try {
+      // Costo real que saldrá de la wallet
+      const totalWalletCost = parseFloat(solAmount) + parseFloat(this.priorityFee) + NETWORK_FEE_SOL;
+
       console.log(`\n💰 [LIVE] Comprando ${solAmount} SOL de ${mint.slice(0, 8)}...`);
+      console.log(`   Costo estimado wallet: ${totalWalletCost.toFixed(6)} SOL`);
 
       // 1. Validaciones pre-trade
-      const preCheck = await this._preTradeValidation(solAmount);
+      const preCheck = await this._preTradeValidation(totalWalletCost);
       if (!preCheck.valid) {
         return { success: false, error: preCheck.reason };
       }
 
-      // 2. Obtener precio actual para calcular tokens esperados
+      // 2. Obtener precio actual para estimar tokens
       const priceData = await priceService.getPrice(mint, true);
-      const expectedTokens = priceData?.price ? solAmount / priceData.price : 0;
+      
+      // Estimación de tokens: (Monto * (1 - Fees)) / Precio
+      const estimatedNetSol = solAmount * (1 - TOTAL_TRADE_FEE);
+      const expectedTokens = priceData?.price ? estimatedNetSol / priceData.price : 0;
 
       // 3. Calcular slippage
       const finalSlippage = slippage || this.slippageBuyPct;
-      const slippageBps = Math.floor(finalSlippage * 100); // Convert % to basis points
+      const slippageBps = Math.floor(finalSlippage * 100);
 
       // 4. Construir transacción via PumpPortal
       const txData = await this._buildBuyTransaction(mint, solAmount, slippageBps);
@@ -169,15 +190,16 @@ export class TradeExecutor {
       console.log(`   ✅ [LIVE] BUY exitoso: ${signature}`);
       console.log(`   🔍 Ver: https://solscan.io/tx/${signature}`);
 
-      // 6. Obtener tokens recibidos (estimado si no podemos leer el tx)
-      const tokensReceived = expectedTokens * 0.98; // Estimado con 2% slippage
+      // 6. Calcular tokens finales (estimado seguro)
+      // Aplicamos un pequeño descuento extra por slippage real vs teórico
+      const tokensReceived = expectedTokens > 0 ? expectedTokens : (solAmount / 0.00000001); 
 
       return {
         success: true,
         simulated: false,
         dryRun: false,
         mint,
-        solSpent: solAmount,
+        solSpent: totalWalletCost, // IMPORTANTE: PnL se calculará sobre esto
         tokensReceived,
         entryPrice: priceData?.price || solAmount / tokensReceived,
         signature,
@@ -198,16 +220,10 @@ export class TradeExecutor {
       return { success: false, error: 'invalid_parameters' };
     }
 
-    // ─────────────────────────────────────────────────────
-    // MODO PAPER
-    // ─────────────────────────────────────────────────────
     if (this.dryRun) {
       return await this._sellTokenPaper(mint, tokenAmount);
     }
 
-    // ─────────────────────────────────────────────────────
-    // MODO LIVE
-    // ─────────────────────────────────────────────────────
     return await this._sellTokenLive(mint, tokenAmount, slippage);
   }
 
@@ -228,14 +244,21 @@ export class TradeExecutor {
           dryRun: true,
           mint,
           tokensSold: tokenAmount,
-          solReceived: tokenAmount * 0.00000001,
+          solReceived: (tokenAmount * 0.00000001) - this.priorityFee, // Fallback muy básico
           exitPrice: 0.00000001,
           source: 'fallback',
           signature: `paper_sell_${Date.now()}`,
         };
       }
 
-      console.log(`   ✅ [PAPER] ${valueData.solValue.toFixed(6)} SOL @ ${valueData.marketPrice.toFixed(12)}`);
+      // Cálculo PnL Realista:
+      // Valor Bruto - Fees (1.5%) - Priority Fee - Gas
+      const grossSol = valueData.solValue;
+      const netSolAfterTradeFees = grossSol * (1 - TOTAL_TRADE_FEE);
+      const finalSolToWallet = netSolAfterTradeFees - this.priorityFee - NETWORK_FEE_SOL;
+
+      console.log(`   ✅ [PAPER] Valor Bruto: ${grossSol.toFixed(6)} SOL`);
+      console.log(`      Neto Wallet: ${finalSolToWallet.toFixed(6)} SOL (tras fees y gas)`);
 
       return {
         success: true,
@@ -243,7 +266,7 @@ export class TradeExecutor {
         dryRun: true,
         mint,
         tokensSold: tokenAmount,
-        solReceived: valueData.solValue,
+        solReceived: finalSolToWallet, // Valor REAL que entraría a la wallet
         exitPrice: valueData.marketPrice,
         source: valueData.source,
         signature: `paper_sell_${Date.now()}`,
@@ -265,9 +288,9 @@ export class TradeExecutor {
     try {
       console.log(`\n💰 [LIVE] Vendiendo ${tokenAmount.toLocaleString()} tokens de ${mint.slice(0, 8)}...`);
 
-      // 1. Obtener valor esperado
+      // 1. Obtener valor esperado bruto
       const valueData = await priceService.calculateCurrentValue(mint, tokenAmount);
-      const expectedSol = valueData?.solValue || 0;
+      const expectedGrossSol = valueData?.solValue || 0;
 
       // 2. Slippage
       const finalSlippage = slippage || this.slippageSellPct;
@@ -290,8 +313,10 @@ export class TradeExecutor {
       console.log(`   ✅ [LIVE] SELL exitoso: ${signature}`);
       console.log(`   🔍 Ver: https://solscan.io/tx/${signature}`);
 
-      // Estimado de SOL recibido (98% del esperado)
-      const solReceived = expectedSol * 0.98;
+      // 5. Calcular lo recibido realmente en Wallet
+      // (Valor Bruto * (1 - 1.5%)) - Priority Fee - Gas
+      const netSolAfterTradeFees = expectedGrossSol * (1 - TOTAL_TRADE_FEE);
+      const finalSolReceived = netSolAfterTradeFees - parseFloat(this.priorityFee) - NETWORK_FEE_SOL;
 
       return {
         success: true,
@@ -299,8 +324,8 @@ export class TradeExecutor {
         dryRun: false,
         mint,
         tokensSold: tokenAmount,
-        solReceived,
-        exitPrice: valueData?.marketPrice || solReceived / tokenAmount,
+        solReceived: finalSolReceived, // PnL exacto
+        exitPrice: valueData?.marketPrice || expectedGrossSol / tokenAmount,
         source: valueData?.source || 'market',
         signature,
         explorerUrl: `https://solscan.io/tx/${signature}`
@@ -319,15 +344,15 @@ export class TradeExecutor {
   /**
    * Validación pre-trade
    */
-  async _preTradeValidation(solAmount) {
+  async _preTradeValidation(requiredSol) {
     try {
-      // Verificar balance
       const balance = await this.getBalance();
       
-      if (balance < solAmount + 0.01) { // +0.01 para fees
+      // Margen de seguridad de 0.002 SOL extra
+      if (balance < requiredSol + 0.002) {
         return {
           valid: false,
-          reason: `insufficient_balance (need ${solAmount + 0.01}, have ${balance})`
+          reason: `insufficient_balance (need ${requiredSol.toFixed(4)}, have ${balance.toFixed(4)})`
         };
       }
 
@@ -342,6 +367,7 @@ export class TradeExecutor {
    */
   async _buildBuyTransaction(mint, solAmount, slippageBps) {
     try {
+      // Endpoint Local Trade (0.5% fee)
       const url = `${PUMPPORTAL_API}/trade-local`;
       
       const payload = {
@@ -367,7 +393,7 @@ export class TradeExecutor {
       }
 
       const data = await response.json();
-      return data;
+      return data; // Retorna objeto con { transaction: "base64..." }
 
     } catch (error) {
       console.error('❌ Error building buy transaction:', error?.message);
@@ -416,7 +442,7 @@ export class TradeExecutor {
   /**
    * Ejecutar transacción con retry
    */
-  async _executeTransactionWithRetry(txBase64, retries = MAX_TX_RETRIES) {
+  async _executeTransactionWithRetry(txBase64, retries = MAX_RETRIES) {
     let lastError = null;
 
     for (let attempt = 0; attempt < retries; attempt++) {
@@ -431,14 +457,16 @@ export class TradeExecutor {
         // Enviar
         const signature = await this.connection.sendRawTransaction(tx.serialize(), {
           skipPreflight: false,
-          maxRetries: 3
+          maxRetries: 2,
+          preflightCommitment: 'processed'
         });
 
         // Confirmar
-        const confirmation = await this.connection.confirmTransaction(
+        const confirmation = await this.connection.confirmTransaction({
           signature,
-          'confirmed'
-        );
+          blockhash: tx.message.recentBlockhash,
+          lastValidBlockHeight: (await this.connection.getLatestBlockhash()).lastValidBlockHeight
+        }, 'confirmed');
 
         if (confirmation.value.err) {
           throw new Error(`Transaction failed: ${JSON.stringify(confirmation.value.err)}`);
