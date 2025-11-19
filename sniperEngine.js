@@ -51,10 +51,8 @@ const SCORING_CONFIG = {
     holderConcentration: 0.15,
     priceStability: 0.15,
     momentum: 0.10
-  } catch (error) {
-    console.error('❌ Error en handleMintEvent:', error?.message || String(error));
   }
-}
+};
 
 // ═══════════════════════════════════════════════════════
 // RISK LOOP MEJORADO
@@ -369,8 +367,6 @@ export async function startSniperEngine(redisInstance) {
   startRiskLoop();
 }
 
-};
-
 // Filtros anti-rug
 const ANTI_RUG_CONFIG = {
   maxCreatorTokensPercent: parseFloat(process.env.MAX_CREATOR_TOKENS_PERCENT || '10'), // Max 10% para creator
@@ -451,10 +447,10 @@ function initCore(redisInstance) {
     riskManager = new RiskManager(riskConfig, redis);
   }
 
-  if (!positionManager) {
-    positionManager = new PositionManager(redis);
+    if (!positionManager) {
+      positionManager = new PositionManager(redis);
+    }
   }
-}
 
 // ═══════════════════════════════════════════════════════
 // RATE LIMITER
@@ -968,4 +964,7 @@ async function handleMintEvent(signal) {
       );
     }
 
+  } catch (error) {
+    console.error('❌ Error en handleMintEvent:', error?.message || String(error));
   }
+}
