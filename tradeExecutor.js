@@ -397,7 +397,7 @@ export class TradeExecutor {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(payload)
-      };
+      });
 
       if (!response.ok) {
         const error = await response.text();
