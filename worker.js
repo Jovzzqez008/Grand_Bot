@@ -1,13 +1,16 @@
-// worker.js - Pump.fun Sniper Worker with ENV CLEANER
+// worker.js - Pump.fun Bot Worker con SCALPING ENGINE
 
 import 'dotenv/config';
 import { cleanAndValidateEnv } from './envCleaner.js';
 import IORedis from 'ioredis';
 import { RiskManager } from './riskManager.js';
 import { startSniperEngine } from './sniperEngine.js';
+import { initScalpingEngine, getScalpingStats } from './scalpingEngine.js';
+import { getPriceService } from './priceService.js';
+import { TradeExecutor } from './tradeExecutor.js';
 
 // 🧹 Limpiar/normalizar env primero
-console.log('🚀 Starting Pump.fun Sniper Worker...\n');
+console.log('🚀 Starting Pump.fun Bot Worker with SCALPING ENGINE...\n');
 const envCleaner = cleanAndValidateEnv();
 
 function parseBoolEnv(value, defaultValue = false) {
@@ -17,7 +20,9 @@ function parseBoolEnv(value, defaultValue = false) {
 }
 
 async function startWorker() {
-  // Verificar Redis
+  // ═══════════════════════════════════════════════════════
+  // 1. REDIS CONNECTION
+  // ═══════════════════════════════════════════════════════
   if (!process.env.REDIS_URL) {
     console.log('❌ REDIS_URL not set - worker cannot start');
     return;
@@ -37,8 +42,10 @@ async function startWorker() {
     return;
   }
 
+  // ═══════════════════════════════════════════════════════
+  // 2. CONFIGURACIÓN
+  // ═══════════════════════════════════════════════════════
   try {
-    // Variables mínimas para operar sniper
     const requiredVars = ['PRIVATE_KEY', 'RPC_URL', 'PUMP_PROGRAM_ID'];
     const missingVars = requiredVars.filter((v) => !process.env[v]);
 
@@ -49,29 +56,46 @@ async function startWorker() {
 
     const dryRun = (process.env.DRY_RUN || '').trim().toLowerCase() !== 'false';
     const autoTrading = parseBoolEnv(process.env.ENABLE_AUTO_TRADING, false);
+    const scalpingEnabled = parseBoolEnv(process.env.ENABLE_SCALPING, false);
 
-    const positionSizeSol = parseFloat(process.env.POSITION_SIZE_SOL || '0.05');
-    const maxPositions = parseInt(process.env.MAX_POSITIONS || '3', 10);
-    const minLiquiditySol = parseFloat(process.env.MIN_LIQUIDITY_SOL || '2');
-    const minInitialVolumeSol = parseFloat(process.env.MIN_INITIAL_VOLUME_SOL || '0');
-    const onlyKingOfHill = parseBoolEnv(process.env.ONLY_KING_OF_HILL, false);
-
-    console.log('📋 Sniper Configuration:');
+    console.log('📋 Bot Configuration:');
+    console.log('═══════════════════════════════════════════════════════');
     console.log(`   Mode: ${dryRun ? '📄 DRY RUN (Paper Trading)' : '💰 LIVE TRADING'}`);
     console.log(`   Auto Trading: ${autoTrading ? 'Enabled' : 'Disabled'}`);
+    console.log(`   Scalping: ${scalpingEnabled ? '✅ Enabled' : '❌ Disabled'}`);
+    console.log('');
+    
+    // ─────────────────────────────────────────────────────
+    // SNIPER CONFIG
+    // ─────────────────────────────────────────────────────
+    const positionSizeSol = parseFloat(process.env.POSITION_SIZE_SOL || '0.05');
+    const maxPositions = parseInt(process.env.MAX_POSITIONS || '2', 10);
+    
+    console.log('🎯 Sniper (Flintr Mint Detection):');
     console.log(`   Position Size: ${positionSizeSol} SOL`);
     console.log(`   Max Positions: ${maxPositions}`);
-    console.log(`   Min Liquidity: ${minLiquiditySol} SOL`);
-    console.log(`   Min Initial Volume: ${minInitialVolumeSol} SOL`);
-    console.log(`   Only King Of Hill: ${onlyKingOfHill ? 'Yes' : 'No'}`);
-    console.log(
-      `   Priority Fee: ${
-        process.env.PRIORITY_FEE ||
-        process.env.PRIORITY_FEE_MICROLAMPORTS ||
-        'default'
-      }`,
-    );
+    console.log(`   Min Liquidity: ${process.env.MIN_LIQUIDITY_SOL || '2'} SOL`);
     console.log('');
+
+    // ─────────────────────────────────────────────────────
+    // SCALPING CONFIG
+    // ─────────────────────────────────────────────────────
+    if (scalpingEnabled) {
+      const scalpSize = parseFloat(process.env.SCALP_POSITION_SIZE_SOL || '0.02');
+      const scalpMax = parseInt(process.env.SCALP_MAX_POSITIONS || '3', 10);
+      const pumpThreshold = parseFloat(process.env.PUMP_THRESHOLD_PERCENT || '5');
+      
+      console.log('⚡ Scalping (Momentum Detection):');
+      console.log(`   Position Size: ${scalpSize} SOL`);
+      console.log(`   Max Positions: ${scalpMax}`);
+      console.log(`   Pump Threshold: ${pumpThreshold}%`);
+      console.log(`   Take Profit: ${process.env.SCALP_TAKE_PROFIT_PERCENT || '6'}%`);
+      console.log(`   Stop Loss: ${process.env.SCALP_STOP_LOSS_PERCENT || '3'}%`);
+      console.log(`   Max Hold: ${process.env.SCALP_MAX_HOLD_TIME_SEC || '300'}s`);
+      console.log('');
+    }
+
+    console.log('═══════════════════════════════════════════════════════\n');
 
     if (!autoTrading) {
       console.log('⚠️ Auto trading is DISABLED');
@@ -86,55 +110,146 @@ async function startWorker() {
       console.log('   Make sure your wallet has enough balance\n');
     }
 
-    // === Iniciar motor SNIPER (Flintr + Pump.fun) ===
-    console.log('🎯 Starting Pump.fun Sniper Engine...');
+    // ═══════════════════════════════════════════════════════
+    // 3. INICIALIZAR SERVICIOS
+    // ═══════════════════════════════════════════════════════
+    
+    console.log('🔧 Initializing services...\n');
+    
+    // Price Service (compartido)
+    const priceService = getPriceService();
+    
+    // Trade Executor (compartido)
+    const tradeExecutor = new TradeExecutor(
+      process.env.PRIVATE_KEY,
+      process.env.RPC_URL,
+      dryRun
+    );
+
+    // ═══════════════════════════════════════════════════════
+    // 4. INICIAR SNIPER ENGINE (Flintr)
+    // ═══════════════════════════════════════════════════════
+    console.log('🎯 Starting Sniper Engine (Flintr)...');
     await startSniperEngine(redis);
     console.log('✅ Sniper Engine started\n');
 
-    // Stats periódicos (usa RiskManager + Redis, igual que antes)
+    // ═══════════════════════════════════════════════════════
+    // 5. INICIAR SCALPING ENGINE (Momentum)
+    // ═══════════════════════════════════════════════════════
+    if (scalpingEnabled) {
+      console.log('⚡ Starting Scalping Engine (Momentum Detection)...');
+      initScalpingEngine(redis, priceService, tradeExecutor);
+      console.log('✅ Scalping Engine started\n');
+    } else {
+      console.log('⚠️ Scalping Engine DISABLED (set ENABLE_SCALPING=true to enable)\n');
+    }
+
+    // ═══════════════════════════════════════════════════════
+    // 6. STATS PERIÓDICOS
+    // ═══════════════════════════════════════════════════════
     const statsIntervalMs = parseInt(process.env.RISK_TICK_INTERVAL || '120000', 10);
 
     setInterval(async () => {
       try {
+        console.log('\n📊 ═══════════════════════════════════════════════════════');
+        console.log('   WORKER STATUS');
+        console.log('   ═══════════════════════════════════════════════════════');
+        
+        const now = new Date().toLocaleString();
+        console.log(`   Time: ${now}\n`);
+
+        // ─────────────────────────────────────────────────────
+        // POSICIONES TOTALES
+        // ─────────────────────────────────────────────────────
         const openPositions = await redis.scard('open_positions');
-        const pendingSignals = await redis.llen('sniper_signals');
+        const scalpPositions = await redis.scard('scalp:active_positions');
+        
+        console.log('   🎯 POSICIONES:');
+        console.log(`      Sniper (Flintr): ${openPositions - scalpPositions}`);
+        
+        if (scalpingEnabled) {
+          console.log(`      Scalping: ${scalpPositions}`);
+          console.log(`      Total: ${openPositions}`);
+        } else {
+          console.log(`      Total: ${openPositions}`);
+        }
+        console.log('');
 
-        console.log('\n📊 Worker Status:');
-        console.log(`   Open Positions: ${openPositions}`);
-        console.log(`   Pending Sniper Signals: ${pendingSignals}`);
-
+        // ─────────────────────────────────────────────────────
+        // STATS DIARIOS (Sniper)
+        // ─────────────────────────────────────────────────────
         try {
           const riskManager = new RiskManager({}, redis);
           const stats = await riskManager.getDailyStats();
 
           if (stats && stats.totalTrades > 0) {
-            console.log(`\n💰 Today's Performance:`);
-            console.log(`   Total Trades: ${stats.totalTrades}`);
-            console.log(`   Wins: ${stats.wins} | Losses: ${stats.losses}`);
-            console.log(`   Win Rate: ${stats.winRate}`);
-            console.log(`   Total P&L: ${stats.totalPnL} SOL`);
-            console.log(`   Biggest Win: ${stats.biggestWin} SOL`);
-            console.log(`   Biggest Loss: ${stats.biggestLoss} SOL`);
+            console.log(`   💰 SNIPER TODAY (Realized):`);
+            console.log(`      Trades: ${stats.totalTrades}`);
+            console.log(`      W/L: ${stats.wins}/${stats.losses}`);
+            console.log(`      Win Rate: ${stats.winRate}`);
+            console.log(`      P&L: ${stats.totalPnL} SOL`);
+            console.log(`      Best: ${stats.biggestWin} SOL`);
+            console.log(`      Worst: ${stats.biggestLoss} SOL`);
+            console.log('');
           }
-        } catch {
-          // Stats no disponibles aún
+        } catch {}
+
+        // ─────────────────────────────────────────────────────
+        // STATS SCALPING
+        // ─────────────────────────────────────────────────────
+        if (scalpingEnabled) {
+          try {
+            const scalpStats = getScalpingStats();
+            
+            console.log(`   ⚡ SCALPING TODAY:`);
+            console.log(`      Scans: ${scalpStats.scansPerformed}`);
+            console.log(`      Pumps Detected: ${scalpStats.pumpsDetected}`);
+            console.log(`      Entries: ${scalpStats.entriesExecuted}`);
+            console.log(`      Exits: ${scalpStats.exitsExecuted}`);
+            console.log(`      W/L: ${scalpStats.wins}/${scalpStats.losses}`);
+            
+            const scalpWinRate = scalpStats.wins + scalpStats.losses > 0
+              ? ((scalpStats.wins / (scalpStats.wins + scalpStats.losses)) * 100).toFixed(2)
+              : '0.00';
+            
+            console.log(`      Win Rate: ${scalpWinRate}%`);
+            console.log(`      P&L: ${scalpStats.totalPnL.toFixed(6)} SOL`);
+            console.log(`      Active: ${scalpStats.activePositions}/${scalpStats.maxPositions}`);
+            console.log('');
+          } catch {}
         }
 
-        console.log('');
-      } catch {
-        // silencioso para no spamear
+        console.log('   ═══════════════════════════════════════════════════════\n');
+      } catch (error) {
+        // Silent
       }
     }, statsIntervalMs);
 
-    console.log('✅ Pump.fun Sniper Worker is running');
-    console.log('   Waiting for Flintr signals to snipe Pump.fun tokens...\n');
+    // ═══════════════════════════════════════════════════════
+    // 7. READY
+    // ═══════════════════════════════════════════════════════
+    console.log('✅ Pump.fun Bot Worker is READY');
+    console.log('═══════════════════════════════════════════════════════');
+    
+    if (scalpingEnabled) {
+      console.log('🎯 Sniper: Waiting for Flintr mint signals...');
+      console.log('⚡ Scalping: Monitoring price momentum...');
+    } else {
+      console.log('🎯 Sniper: Waiting for Flintr mint signals...');
+    }
+    
+    console.log('═══════════════════════════════════════════════════════\n');
+
   } catch (error) {
     console.log('❌ Worker setup failed:', error?.message || String(error));
     process.exit(1);
   }
 }
 
-// Manejo de errores global
+// ═══════════════════════════════════════════════════════
+// ERROR HANDLERS
+// ═══════════════════════════════════════════════════════
+
 process.on('unhandledRejection', (err) => {
   console.log('Unhandled rejection:', err?.message || String(err));
 });
@@ -142,11 +257,14 @@ process.on('unhandledRejection', (err) => {
 process.on('SIGINT', async () => {
   console.log('\n\n🛑 Shutting down worker...');
   try {
-    // Aquí en el futuro podemos cerrar WebSocket de Flintr
+    // Cleanup si es necesario
   } catch {}
   console.log('✅ Worker stopped gracefully\n');
   process.exit(0);
 });
 
-// Iniciar el worker
+// ═══════════════════════════════════════════════════════
+// START
+// ═══════════════════════════════════════════════════════
+
 startWorker();
