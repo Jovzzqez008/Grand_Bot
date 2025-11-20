@@ -1,8 +1,13 @@
-// telegram.js - Pump.fun Sniper Bot (Flintr + PnL + DRY_RUN)
+// telegram.js - Pump.fun Bot con SCALPING COMMANDS
 
 import TelegramBot from 'node-telegram-bot-api';
 import IORedis from 'ioredis';
 import { getPriceService } from './priceService.js';
+import { 
+  getScalpingStats, 
+  addTokenToWatchlist, 
+  removeTokenFromWatchlist 
+} from './scalpingEngine.js';
 
 const BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN;
 const OWNER_CHAT_ID =
@@ -71,7 +76,7 @@ export async function initTelegram() {
       });
     }
 
-    console.log('✅ Telegram bot initialized (Pump.fun Sniper Mode)');
+    console.log('✅ Telegram bot initialized');
 
     // ═════════════════════════════════════════════════════
     // /start - Help
@@ -85,31 +90,42 @@ export async function initTelegram() {
       const mode =
         (process.env.DRY_RUN || '').trim().toLowerCase() === 'false'
           ? '💰 LIVE'
-          : '📝 PAPER (DRY_RUN)';
+          : '📝 PAPER';
+
+      const scalpingEnabled = 
+        (process.env.ENABLE_SCALPING || '').trim().toLowerCase() === 'true';
 
       await safeSend(
         chatId,
-        `💼 Pump.fun Sniper Bot\n\n` +
-          `Mode: ${mode}\n\n` +
+        `💼 Pump.fun Bot with SCALPING\n\n` +
+          `Mode: ${mode}\n` +
+          `Scalping: ${scalpingEnabled ? '✅ Enabled' : '❌ Disabled'}\n\n` +
           `📊 General:\n` +
-          `/status    - Estado del bot + P&L abierto\n` +
-          `/positions - Posiciones abiertas (Flintr)\n` +
-          `/stats     - Rendimiento de hoy (realizado)\n\n` +
-          `💰 Trading (Sniper / Flintr):\n` +
-          `/sell MINT  - Cerrar UNA posición (simulado si DRY_RUN)\n` +
-          `/sell_all   - Cerrar TODAS las posiciones (simulado si DRY_RUN)\n\n` +
-          `ℹ️ Copy trading está DESACTIVADO. Solo se usan señales de Flintr y el motor sniper.`,
+          `/status       - Bot status + P&L\n` +
+          `/positions    - Posiciones abiertas (todas)\n` +
+          `/stats        - Stats del día (Sniper)\n\n` +
+          `⚡ Scalping:\n` +
+          `/scalp_stats  - Stats de scalping\n` +
+          `/scalp_pos    - Posiciones de scalping activas\n` +
+          `/watch MINT   - Agregar token a watchlist\n` +
+          `/unwatch MINT - Quitar token de watchlist\n\n` +
+          `💰 Trading:\n` +
+          `/sell MINT    - Cerrar posición específica\n` +
+          `/sell_all     - Cerrar todas las posiciones\n\n` +
+          `ℹ️ El bot combina 2 estrategias:\n` +
+          `   🎯 Sniper: Mints nuevos (Flintr)\n` +
+          `   ⚡ Scalping: Momentum (pumps)`
       );
     });
 
     // ═════════════════════════════════════════════════════
-    // /status - Estado general + PnL abierto
+    // /status - Estado general
     // ═════════════════════════════════════════════════════
     bot.onText(/\/status/, async (msg) => {
       const chatId = msg.chat.id;
       if (!isOwner(chatId)) return;
       if (!redis) {
-        return safeSend(chatId, '❌ Redis no está configurado para Telegram.');
+        return safeSend(chatId, '❌ Redis no disponible');
       }
 
       try {
@@ -117,79 +133,222 @@ export async function initTelegram() {
           (process.env.DRY_RUN || '').trim().toLowerCase() === 'false'
             ? '💰 LIVE'
             : '📝 PAPER';
-        const maxPositions = parseInt(process.env.MAX_POSITIONS || '2', 10);
 
-        const openMints = await redis.smembers('open_positions');
-        const openPositions = [];
-        for (const mint of openMints) {
-          const pos = await redis.hgetall(`position:${mint}`);
-          if (pos && pos.status === 'open') {
-            openPositions.push({ mint, ...pos });
-          }
+        const scalpingEnabled = 
+          (process.env.ENABLE_SCALPING || '').trim().toLowerCase() === 'true';
+
+        const openMints = await redis.scard('open_positions');
+        const scalpMints = await redis.scard('scalp:active_positions');
+        const sniperMints = openMints - scalpMints;
+
+        let message = `📊 Bot Status\n\n`;
+        message += `Mode: ${mode}\n\n`;
+        message += `🎯 Sniper Positions: ${sniperMints}\n`;
+        
+        if (scalpingEnabled) {
+          message += `⚡ Scalping Positions: ${scalpMints}\n`;
         }
+        
+        message += `📦 Total Open: ${openMints}\n\n`;
 
-        const sniperPositions = openPositions.filter(
-          (p) => p.entry_strategy === 'flintr' || p.strategy === 'flintr',
-        );
-
-        let totalSolSpent = 0;
-        let totalSolNow = 0;
-
-        for (const pos of sniperPositions) {
-          const tokensAmount = parseInt(pos.tokensAmount || '0', 10);
-          const solAmount = parseFloat(pos.solAmount || '0');
-          if (!tokensAmount || !solAmount) continue;
-
-          const valueData = await priceService.calculateCurrentValue(
-            pos.mint,
-            tokensAmount,
-          );
-          if (!valueData || !valueData.solValue) continue;
-
-          totalSolSpent += solAmount;
-          totalSolNow += valueData.solValue;
-        }
-
-        const unrealizedPnL = totalSolNow - totalSolSpent;
-
+        // Stats del día
         const { RiskManager } = await import('./riskManager.js');
         const riskManager = new RiskManager({}, redis);
         const stats = await riskManager.getDailyStats();
 
-        let statsText = 'No trades yet today';
         if (stats && stats.totalTrades > 0) {
-          statsText =
-            `Trades: ${stats.totalTrades} (Wins: ${stats.wins}, Losses: ${stats.losses})\n` +
-            `Win Rate: ${stats.winRate}\n` +
-            `Realized P&L: ${stats.totalPnL} SOL`;
+          message += `💰 Today (Sniper Realized):\n`;
+          message += `Trades: ${stats.totalTrades}\n`;
+          message += `Win Rate: ${stats.winRate}\n`;
+          message += `P&L: ${stats.totalPnL} SOL\n`;
+        } else {
+          message += `💰 No trades yet today\n`;
         }
 
-        await safeSend(
-          chatId,
-          `📊 Status (Pump.fun Sniper)\n\n` +
-            `Mode: ${mode}\n` +
-            `Open Sniper Positions (Flintr): ${sniperPositions.length}/${maxPositions}\n` +
-            `Total Open Positions (cualquier estrategia): ${openPositions.length}\n\n` +
-            `💰 Unrealized P&L (solo Flintr): ${unrealizedPnL.toFixed(4)} SOL\n\n` +
-            `📈 Today's Performance (realizado):\n` +
-            `${statsText}`,
-        );
+        await safeSend(chatId, message);
       } catch (error) {
         await safeSend(
           chatId,
-          `❌ Error: ${error?.message || String(error)}`,
+          `❌ Error: ${error?.message || String(error)}`
         );
       }
     });
 
     // ═════════════════════════════════════════════════════
-    // /positions - Posiciones abiertas (solo sniper / Flintr)
+    // /scalp_stats - Stats de scalping
+    // ═════════════════════════════════════════════════════
+    bot.onText(/\/scalp_stats/, async (msg) => {
+      const chatId = msg.chat.id;
+      if (!isOwner(chatId)) return;
+
+      const scalpingEnabled = 
+        (process.env.ENABLE_SCALPING || '').trim().toLowerCase() === 'true';
+
+      if (!scalpingEnabled) {
+        return safeSend(
+          chatId,
+          '⚠️ Scalping está deshabilitado.\nSet ENABLE_SCALPING=true para habilitar.'
+        );
+      }
+
+      try {
+        const stats = getScalpingStats();
+
+        const winRate = stats.wins + stats.losses > 0
+          ? ((stats.wins / (stats.wins + stats.losses)) * 100).toFixed(2)
+          : '0.00';
+
+        let message = `⚡ SCALPING STATS\n\n`;
+        message += `📊 Activity:\n`;
+        message += `Scans: ${stats.scansPerformed}\n`;
+        message += `Pumps Detected: ${stats.pumpsDetected}\n`;
+        message += `Entries: ${stats.entriesExecuted}\n`;
+        message += `Exits: ${stats.exitsExecuted}\n\n`;
+        
+        message += `💰 Performance:\n`;
+        message += `Win Rate: ${winRate}%\n`;
+        message += `Wins: ${stats.wins} | Losses: ${stats.losses}\n`;
+        message += `Total P&L: ${stats.totalPnL.toFixed(6)} SOL\n\n`;
+        
+        message += `📦 Positions:\n`;
+        message += `Active: ${stats.activePositions}/${stats.maxPositions}\n`;
+
+        await safeSend(chatId, message);
+      } catch (error) {
+        await safeSend(
+          chatId,
+          `❌ Error: ${error?.message || String(error)}`
+        );
+      }
+    });
+
+    // ═════════════════════════════════════════════════════
+    // /scalp_pos - Posiciones de scalping activas
+    // ═════════════════════════════════════════════════════
+    bot.onText(/\/scalp_pos/, async (msg) => {
+      const chatId = msg.chat.id;
+      if (!isOwner(chatId)) return;
+      if (!redis) {
+        return safeSend(chatId, '❌ Redis no disponible');
+      }
+
+      try {
+        const stats = getScalpingStats();
+
+        if (stats.activePositions === 0) {
+          return safeSend(
+            chatId,
+            '⚡ No hay posiciones de scalping activas.\n\n' +
+            'El motor busca tokens con momentum (pumps rápidos).'
+          );
+        }
+
+        let message = `⚡ SCALPING POSITIONS\n\n`;
+
+        for (let i = 0; i < stats.positions.length; i++) {
+          const pos = stats.positions[i];
+          
+          message += `${i + 1}. ${pos.mint}\n`;
+          message += `   Entry: ${pos.entryPrice.toFixed(10)}\n`;
+          message += `   Pump: ${pos.pumpPercent.toFixed(2)}%\n`;
+          message += `   Hold: ${pos.holdTimeSec}s\n`;
+          message += `   /sell ${pos.mint.split('...')[0]}\n\n`;
+        }
+
+        await safeSend(chatId, message);
+      } catch (error) {
+        await safeSend(
+          chatId,
+          `❌ Error: ${error?.message || String(error)}`
+        );
+      }
+    });
+
+    // ═════════════════════════════════════════════════════
+    // /watch - Agregar a watchlist
+    // ═════════════════════════════════════════════════════
+    bot.onText(/\/watch(?:\s+(.+))?/, async (msg, match) => {
+      const chatId = msg.chat.id;
+      if (!isOwner(chatId)) return;
+
+      const mintArg = match?.[1]?.trim();
+
+      if (!mintArg) {
+        return safeSend(
+          chatId,
+          `⚡ Watchlist de Scalping\n\n` +
+          `Agrega tokens para que el motor de scalping los monitoree.\n\n` +
+          `Uso: /watch MINT\n` +
+          `Ejemplo: /watch 7xKXtGH4Ab...`
+        );
+      }
+
+      try {
+        const success = await addTokenToWatchlist(mintArg);
+        
+        if (success) {
+          await safeSend(
+            chatId,
+            `✅ Token agregado a watchlist de scalping\n\n` +
+            `Mint: ${mintArg.slice(0, 20)}...\n\n` +
+            `El motor escaneará este token en busca de pumps.`
+          );
+        } else {
+          await safeSend(chatId, `❌ Error agregando token a watchlist`);
+        }
+      } catch (error) {
+        await safeSend(
+          chatId,
+          `❌ Error: ${error?.message || String(error)}`
+        );
+      }
+    });
+
+    // ═════════════════════════════════════════════════════
+    // /unwatch - Quitar de watchlist
+    // ═════════════════════════════════════════════════════
+    bot.onText(/\/unwatch(?:\s+(.+))?/, async (msg, match) => {
+      const chatId = msg.chat.id;
+      if (!isOwner(chatId)) return;
+
+      const mintArg = match?.[1]?.trim();
+
+      if (!mintArg) {
+        return safeSend(
+          chatId,
+          `Uso: /unwatch MINT\n` +
+          `Ejemplo: /unwatch 7xKXtGH4Ab...`
+        );
+      }
+
+      try {
+        const success = await removeTokenFromWatchlist(mintArg);
+        
+        if (success) {
+          await safeSend(
+            chatId,
+            `✅ Token removido de watchlist\n\n` +
+            `Mint: ${mintArg.slice(0, 20)}...`
+          );
+        } else {
+          await safeSend(chatId, `❌ Error removiendo token`);
+        }
+      } catch (error) {
+        await safeSend(
+          chatId,
+          `❌ Error: ${error?.message || String(error)}`
+        );
+      }
+    });
+
+    // ═════════════════════════════════════════════════════
+    // /positions - Todas las posiciones
     // ═════════════════════════════════════════════════════
     bot.onText(/\/positions/, async (msg) => {
       const chatId = msg.chat.id;
       if (!isOwner(chatId)) return;
       if (!redis) {
-        return safeSend(chatId, '❌ Redis no está configurado para Telegram.');
+        return safeSend(chatId, '❌ Redis no disponible');
       }
 
       try {
@@ -197,57 +356,27 @@ export async function initTelegram() {
         const positionManager = new PositionManager(redis);
         const positions = await positionManager.getOpenPositions();
 
-        const sniperPositions = positions.filter(
-          (p) => p.entry_strategy === 'flintr' || p.strategy === 'flintr',
-        );
-
-        if (sniperPositions.length === 0) {
+        if (positions.length === 0) {
           return safeSend(
             chatId,
-            '🔭 No hay posiciones abiertas del sniper (Flintr).\n\n' +
-              'Espera a que lleguen nuevas señales y el bot abra entradas.',
+            '🔭 No hay posiciones abiertas'
           );
         }
 
-        let message = '📈 Open Sniper Positions (Flintr):\n\n';
+        let message = `📈 POSICIONES ABIERTAS (${positions.length})\n\n`;
 
-        for (let i = 0; i < sniperPositions.length; i++) {
-          const pos = sniperPositions[i];
+        for (let i = 0; i < positions.length; i++) {
+          const pos = positions[i];
+          const strategy = pos.entry_strategy || pos.strategy || 'unknown';
+          const emoji = strategy === 'scalping' ? '⚡' : '🎯';
+          
           const entryPrice = parseFloat(pos.entryPrice || '0');
           const solAmount = parseFloat(pos.solAmount || '0');
-          const tokensAmount = parseInt(pos.tokensAmount || '0', 10);
-          const entryTime = parseInt(pos.entryTime || '0', 10);
 
-          if (!entryPrice || !solAmount || !tokensAmount || !entryTime) {
-            continue;
-          }
-
-          const priceData = await priceService.getPriceWithFallback(pos.mint);
-          let currentPrice = entryPrice;
-          let isGraduated = false;
-
-          if (priceData && priceData.price && !isNaN(priceData.price)) {
-            currentPrice = priceData.price;
-            isGraduated = !!priceData.graduated;
-          }
-
-          const pnlPercent = ((currentPrice - entryPrice) / entryPrice) * 100;
-          const pnlSOL = (pnlPercent / 100) * solAmount;
-          const emoji = pnlPercent >= 0 ? '🟢' : '🔴';
-          const holdTimeSec = ((Date.now() - entryTime) / 1000).toFixed(0);
-
-          const posNum = i + 1;
-          const gradTag = isGraduated ? ' 🎓' : '';
-
-          message += `${emoji} Position ${posNum}${gradTag}\n`;
+          message += `${emoji} ${i + 1}. ${strategy.toUpperCase()}\n`;
           message += `Mint: ${pos.mint.slice(0, 12)}...\n`;
-          message += `Size: ${solAmount.toFixed(4)} SOL\n`;
           message += `Entry: ${entryPrice.toFixed(10)}\n`;
-          message += `Current: ${currentPrice.toFixed(10)}\n`;
-          message += `PnL: ${pnlPercent.toFixed(2)}% | ${pnlSOL.toFixed(
-            4,
-          )} SOL\n`;
-          message += `Hold: ${holdTimeSec}s\n`;
+          message += `Size: ${solAmount.toFixed(4)} SOL\n`;
           message += `/sell ${pos.mint.slice(0, 8)}\n\n`;
         }
 
@@ -255,19 +384,19 @@ export async function initTelegram() {
       } catch (error) {
         await safeSend(
           chatId,
-          `❌ Error: ${error?.message || String(error)}`,
+          `❌ Error: ${error?.message || String(error)}`
         );
       }
     });
 
     // ═════════════════════════════════════════════════════
-    // /sell - Cerrar UNA posición (simulación si DRY_RUN)
+    // /sell - Cerrar posición
     // ═════════════════════════════════════════════════════
     bot.onText(/\/sell(?:\s+(.+))?/, async (msg, match) => {
       const chatId = msg.chat.id;
       if (!isOwner(chatId)) return;
       if (!redis) {
-        return safeSend(chatId, '❌ Redis no está configurado para Telegram.');
+        return safeSend(chatId, '❌ Redis no disponible');
       }
 
       const mintArg = match?.[1]?.trim();
@@ -275,18 +404,15 @@ export async function initTelegram() {
       if (!mintArg) {
         return safeSend(
           chatId,
-          `💰 Manual Sell (Sniper)\n\n` +
+          `💰 Manual Sell\n\n` +
             `Uso: /sell MINT\n` +
             `Ejemplo: /sell 7xKXtGH4\n\n` +
-            `Usa /positions para ver las posiciones abiertas.`,
+            `Usa /positions para ver posiciones.`
         );
       }
 
       try {
-        await safeSend(
-          chatId,
-          '⏳ Procesando venta manual (simulada si DRY_RUN)...',
-        );
+        await safeSend(chatId, '⏳ Procesando venta...');
 
         const openMints = await redis.smembers('open_positions');
         let targetMint = null;
@@ -301,7 +427,7 @@ export async function initTelegram() {
         if (!targetMint) {
           return safeSend(
             chatId,
-            `❌ No se encontró posición para: ${mintArg}`,
+            `❌ No se encontró posición para: ${mintArg}`
           );
         }
 
@@ -310,42 +436,21 @@ export async function initTelegram() {
           return safeSend(chatId, `❌ Posición inválida o ya cerrada`);
         }
 
-        if (
-          position.entry_strategy !== 'flintr' &&
-          position.strategy !== 'flintr' &&
-          position.strategy !== 'sniper'
-        ) {
-          return safeSend(
-            chatId,
-            `⚠️ Esta posición no es del sniper (Flintr).\n` +
-              `Por seguridad, solo se permite /sell en posiciones del sniper.`,
-          );
-        }
-
         const entryPrice = parseFloat(position.entryPrice || '0');
         const solAmount = parseFloat(position.solAmount || '0');
         const tokensAmount = parseInt(position.tokensAmount || '0', 10);
 
-        if (!entryPrice || !solAmount || !tokensAmount) {
-          return safeSend(
-            chatId,
-            `❌ Datos incompletos de la posición, no se puede cerrar.`,
-          );
-        }
-
         const valueData = await priceService.calculateCurrentValue(
           targetMint,
-          tokensAmount,
+          tokensAmount
         );
 
         let exitPrice = entryPrice;
         let solReceived = solAmount;
-        let source = 'entry_price_fallback';
 
         if (valueData && valueData.solValue && valueData.marketPrice) {
           exitPrice = valueData.marketPrice;
           solReceived = valueData.solValue;
-          source = valueData.source || 'market';
         }
 
         const pnlSOL = solReceived - solAmount;
@@ -360,175 +465,45 @@ export async function initTelegram() {
           tokensAmount,
           solReceived,
           'telegram_manual_sell',
-          'TELEGRAM_SIMULATED',
+          'TELEGRAM'
         );
 
         const dryRun =
           (process.env.DRY_RUN || '').trim().toLowerCase() !== 'false';
-        const mode = dryRun ? '📝 PAPER (SIMULATED)' : '💰 LIVE (NO TX)';
-        const gradTag = valueData?.graduated ? ' 🎓' : '';
+        const mode = dryRun ? '📝 PAPER' : '💰 LIVE';
 
         await safeSend(
           chatId,
-          `✅ ${mode} MANUAL SELL${gradTag}\n\n` +
+          `✅ ${mode} MANUAL SELL\n\n` +
             `Mint: ${targetMint.slice(0, 12)}...\n` +
-            `Source: ${source}\n` +
             `Entry: ${entryPrice.toFixed(10)}\n` +
             `Exit: ${exitPrice.toFixed(10)}\n\n` +
             `💰 PnL: ${pnlPercent.toFixed(2)}%\n` +
-            `Amount: ${pnlSOL.toFixed(4)} SOL\n`,
+            `Amount: ${pnlSOL.toFixed(4)} SOL`
         );
       } catch (error) {
         await safeSend(
           chatId,
-          `❌ Error: ${error?.message || String(error)}`,
+          `❌ Error: ${error?.message || String(error)}`
         );
       }
     });
 
     // ═════════════════════════════════════════════════════
-    // /sell_all - Cerrar TODAS las posiciones sniper (simulación)
-    // ═════════════════════════════════════════════════════
-    bot.onText(/\/sell_all/, async (msg) => {
-      const chatId = msg.chat.id;
-      if (!isOwner(chatId)) return;
-      if (!redis) {
-        return safeSend(chatId, '❌ Redis no está configurado para Telegram.');
-      }
-
-      try {
-        await safeSend(
-          chatId,
-          '⏳ Cerrando TODAS las posiciones del sniper (simulado si DRY_RUN)...',
-        );
-
-        const { PositionManager } = await import('./riskManager.js');
-        const positionManager = new PositionManager(redis);
-        const positions = await positionManager.getOpenPositions();
-
-        const sniperPositions = positions.filter(
-          (p) =>
-            p.entry_strategy === 'flintr' ||
-            p.strategy === 'flintr' ||
-            p.strategy === 'sniper',
-        );
-
-        if (sniperPositions.length === 0) {
-          return safeSend(
-            chatId,
-            '🔭 No hay posiciones del sniper para cerrar.',
-          );
-        }
-
-        let closed = 0;
-        let failed = 0;
-
-        for (const pos of sniperPositions) {
-          try {
-            const entryPrice = parseFloat(pos.entryPrice || '0');
-            const solAmount = parseFloat(pos.solAmount || '0');
-            const tokensAmount = parseInt(pos.tokensAmount || '0', 10);
-
-            if (!entryPrice || !solAmount || !tokensAmount) {
-              failed++;
-              continue;
-            }
-
-            const valueData = await priceService.calculateCurrentValue(
-              pos.mint,
-              tokensAmount,
-            );
-
-            let exitPrice = entryPrice;
-            let solReceived = solAmount;
-
-            if (valueData && valueData.solValue && valueData.marketPrice) {
-              exitPrice = valueData.marketPrice;
-              solReceived = valueData.solValue;
-            }
-
-            await positionManager.closePosition(
-              pos.mint,
-              exitPrice,
-              tokensAmount,
-              solReceived,
-              'telegram_manual_sell_all',
-              'TELEGRAM_SIMULATED',
-            );
-            closed++;
-          } catch (e) {
-            failed++;
-          }
-        }
-
-        await safeSend(
-          chatId,
-          `✅ SELL ALL (Sniper / Flintr)\n\n` +
-            `Closed: ${closed}\n` +
-            `Failed: ${failed}\n\n` +
-            `ℹ️ En DRY_RUN esto es solo actualización de P&L, no se envían transacciones.`,
-        );
-      } catch (error) {
-        await safeSend(
-          chatId,
-          `❌ Error: ${error?.message || String(error)}`,
-        );
-      }
-    });
-
-    // ═════════════════════════════════════════════════════
-    // /stats - Rendimiento del día (realizado)
-    // ═════════════════════════════════════════════════════
-    bot.onText(/\/stats/, async (msg) => {
-      const chatId = msg.chat.id;
-      if (!isOwner(chatId)) return;
-      if (!redis) {
-        return safeSend(chatId, '❌ Redis no está configurado para Telegram.');
-      }
-
-      try {
-        const { RiskManager } = await import('./riskManager.js');
-        const riskManager = new RiskManager({}, redis);
-        const stats = await riskManager.getDailyStats();
-
-        if (!stats || stats.totalTrades === 0) {
-          return safeSend(chatId, '🔭 No trades today yet');
-        }
-
-        await safeSend(
-          chatId,
-          `📊 Pump.fun Sniper - Today's Performance\n\n` +
-            `Total Trades: ${stats.totalTrades}\n` +
-            `Wins: ${stats.wins} | Losses: ${stats.losses}\n` +
-            `Win Rate: ${stats.winRate}\n\n` +
-            `Realized P&L: ${stats.totalPnL} SOL\n` +
-            `Avg P&L: ${stats.avgPnL} SOL\n` +
-            `Best: ${stats.biggestWin} SOL\n` +
-            `Worst: ${stats.biggestLoss} SOL\n`,
-        );
-      } catch (error) {
-        await safeSend(
-          chatId,
-          `❌ Error: ${error?.message || String(error)}`,
-        );
-      }
-    });
-
-    // ═════════════════════════════════════════════════════
-    // Errores de polling
+    // Polling error handler
     // ═════════════════════════════════════════════════════
     bot.on('polling_error', (error) => {
       console.log(
         'Telegram polling error:',
-        error?.message || String(error),
+        error?.message || String(error)
       );
     });
 
-    console.log('✅ Telegram sniper commands registered');
+    console.log('✅ Telegram commands registered (with SCALPING)\n');
   } catch (error) {
     console.error(
       '❌ Failed to initialize Telegram bot:',
-      error?.message || String(error),
+      error?.message || String(error)
     );
   }
 }
